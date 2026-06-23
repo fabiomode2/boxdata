@@ -1,0 +1,13 @@
+pyproject.toml
+src/__init__.py
+src/collector.py
+src/config.py
+src/database.py
+src/indexer.py
+src/models.py
+src/vector_store.py
+src/boxdata.egg-info/PKG-INFO
+src/boxdata.egg-info/SOURCES.txt
+src/boxdata.egg-info/dependency_links.txt
+src/boxdata.egg-info/requires.txt
+src/boxdata.egg-info/top_level.txt
