@@ -2,6 +2,7 @@
 """Collect movies from TMDB and save to JSONL for later embedding."""
 import argparse
 import json
+import logging
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
@@ -9,6 +10,8 @@ from pathlib import Path
 from tqdm import tqdm
 
 from src.collector import fetch_movies_by_year
+
+logger = logging.getLogger(__name__)
 
 DATA_FILE = Path(__file__).parent / "data" / "movies.jsonl"
 
@@ -21,7 +24,8 @@ def load_collected_ids() -> set[int]:
 
 
 def run_collect(
-    start: int, end: int | None, max_per_year: int, test: bool, skip_credits: bool
+    start: int, end: int | None, max_per_year: int, test: bool,
+    skip_credits: bool, skip_imdb: bool,
 ) -> None:
     if end is None:
         end = date.today().year
@@ -31,7 +35,7 @@ def run_collect(
         years = years[:2]
 
     collected_ids = load_collected_ids()
-    print(f"Known movies in JSONL: {len(collected_ids)}", flush=True)
+    logger.info("Known movies in JSONL: %d", len(collected_ids))
 
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     total_new = 0
@@ -43,6 +47,7 @@ def run_collect(
                 max_per_year=max_per_year,
                 skip_credits=skip_credits,
                 seen_ids=collected_ids,
+                enrich=not skip_imdb,
             )
             for movie in movies:
                 d = asdict(movie)
@@ -54,7 +59,7 @@ def run_collect(
             if movies:
                 tqdm.write(f"  {year}: +{len(movies)}")
 
-    print(f"\nDone. +{total_new} new. Total in JSONL: {len(collected_ids)}", flush=True)
+    logger.info("Done. +%d new. Total in JSONL: %d", total_new, len(collected_ids))
 
 
 if __name__ == "__main__":
@@ -64,5 +69,6 @@ if __name__ == "__main__":
     parser.add_argument("--max-per-year", type=int, default=100)
     parser.add_argument("--test", action="store_true", help="Only 2 years")
     parser.add_argument("--skip-credits", action="store_true", help="Skip TMDB credits call")
+    parser.add_argument("--skip-imdb", action="store_true", help="Skip IMDb API enrichment")
     args = parser.parse_args()
-    run_collect(args.start, args.end, args.max_per_year, args.test, args.skip_credits)
+    run_collect(args.start, args.end, args.max_per_year, args.test, args.skip_credits, args.skip_imdb)

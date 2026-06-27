@@ -11,11 +11,74 @@ Usage:
   python main.py recommend --user alice bob  [--n 10]
 """
 import argparse
+import logging
 
 from src.vector_store import count_movies
 
+logger = logging.getLogger(__name__)
+
+
+def _show_help(parser: argparse.ArgumentParser) -> None:
+    print("""
+ BoxData — Movie Recommendation System
+
+ USOS PRINCIPALES:
+   python main.py help                    Mostrar esta ayuda
+   python main.py <comando> -h            Ayuda detallada de un comando
+
+ COLECTAR DATOS:
+   python main.py collect --start 1900 --end 2026 --max-per-year 100
+         --start AÑO       Año inicial (default: 1900)
+         --end AÑO         Año final (default: año actual)
+         --max-per-year N  Películas por año (default: 100)
+         --test            Solo 2 años (quick test)
+          --skip-credits    Saltar fetch de créditos
+          --skip-imdb       Saltar enrichment de IMDb API (subgéneros, metacritic)
+
+ EMBEDDINGS:
+   python main.py embed                    Generar embeddings (Ollama + nomic-embed-text)
+
+ ESTADO:
+   python main.py count                    Películas en ChromaDB
+   python main.py clear-db                 Borrar toda la base vectorial
+
+ ANALIZAR PERFIL:
+   python main.py analyze --export DIR
+         --export DIR      Ruta al export .csv de Letterboxd
+
+ RECOMENDACIONES:
+   python main.py recommend --ids 550 680
+         --ids TMDB_ID     IDs de TMDB que le gustan a un usuario
+
+   python main.py recommend --user alice bob
+         --user USER       Usuarios de Letterboxd (scrapea diario + ratings)
+         --no-cache        Ignorar caché
+
+   python main.py recommend --export DIR
+         --export DIR      Export .csv de Letterboxd
+
+   python main.py recommend --query "gritty noir"
+         --query TEXTO     Búsqueda semántica por texto
+
+   python main.py recommend --export DIR --query "noir"
+         --query-weight W  Peso de la query vs perfil (0-1, default 0.3)
+
+  OPCIONES COMUNES:
+    --n N                 Número de resultados (default: 10)
+    --min-votes N         Votaciones mínimas en TMDB (default: 10)
+    --sigma SIGMA         Suavizado del kernel (default: 0.3)
+    --max-distance DIST   Distancia máxima para considerar historial
+                          (0-1, -1=sin límite, default: 0.3)
+    --diversity LAM       Diversidad 0=relevancia, 1=variedad (default: 0)
+""".strip())
+
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     parser = argparse.ArgumentParser(description="BoxData — movie recommendation system")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -25,16 +88,22 @@ def main() -> None:
     collect_p.add_argument("--max-per-year", type=int, default=100)
     collect_p.add_argument("--test", action="store_true", help="Only 2 years")
     collect_p.add_argument("--skip-credits", action="store_true", help="Skip TMDB credits")
+    collect_p.add_argument("--skip-imdb", action="store_true", help="Skip IMDb API enrichment")
 
     sub.add_parser("embed", help="Generate embeddings from JSONL → ChromaDB")
     sub.add_parser("count", help="Show movie count in ChromaDB")
     sub.add_parser("clear-db", help="Delete ALL embeddings from ChromaDB")
+    sub.add_parser("explore", help="UMAP + HDBSCAN + Plotly visualization of the embedding space")
 
     analyze_p = sub.add_parser("analyze", help="Analyze your Letterboxd taste profile")
     analyze_p.add_argument("--export", type=str, required=True,
                            help="Path to Letterboxd export directory")
 
     rec_p = sub.add_parser("recommend", help="Recommend movies for 1+ users")
+    rec_p.add_argument("--query", type=str, metavar="TEXT",
+                       help="Free-text description of what you want to watch")
+    rec_p.add_argument("--query-weight", type=float, default=0.3,
+                       help="How much the query influences results (0–1, default 0.3)")
     rec_ids = rec_p.add_mutually_exclusive_group()
     rec_ids.add_argument("--ids", type=int, nargs="+", metavar="TMDB_ID",
                          help="TMDB IDs of movies one user likes")
@@ -45,86 +114,154 @@ def main() -> None:
     rec_p.add_argument("--n", type=int, default=10, help="Number of recommendations")
     rec_p.add_argument("--min-votes", type=int, default=10,
                         help="Minimum vote_count filter")
+    rec_p.add_argument("--no-cache", action="store_true",
+                        help="Ignore cached scraped profiles")
+    rec_p.add_argument("--sigma", type=float, default=0.3, metavar="SIGMA",
+                       help="Kernel bandwidth for rating prediction (default 0.3)")
+    rec_p.add_argument("--auto-sigma", action="store_true",
+                       help="Auto-calibrate sigma per user via cross-validation (overrides --sigma)")
+    rec_p.add_argument("--max-distance", type=float, default=0.3, metavar="DIST",
+                       help="Max cosine distance for history matches (0-1, -1=no limit, default 0.3)")
+    rec_p.add_argument("--diversity", type=float, default=0.0, metavar="LAM",
+                        help="Diversity in results (0=relevance, 1=variety, default 0)")
+    rec_p.add_argument("--genre", type=str, default=None, metavar="GENRES",
+                        help="Filter by genres (comma-separated, e.g. 'Drama,Thriller')")
+    rec_p.add_argument("--min-year", type=int, default=None, metavar="YEAR",
+                        help="Minimum release year (e.g. 2000)")
+    rec_p.add_argument("--max-year", type=int, default=None, metavar="YEAR",
+                        help="Maximum release year (e.g. 2020)")
+    rec_p.add_argument("--min-rating", type=float, default=6.5, metavar="RATING",
+                        help="Minimum TMDB vote average (default 6.5)")
+    rec_p.add_argument("--randomize", action="store_true",
+                        help="Randomize discovery seeds for varied results")
+
+    sub.add_parser("help", help="Show this help message")
 
     args = parser.parse_args()
 
+    if args.command == "help":
+        _show_help(parser)
+        return
+
     if args.command == "collect":
         from collect import run_collect
-        run_collect(args.start, args.end, args.max_per_year, args.test, args.skip_credits)
+        run_collect(args.start, args.end, args.max_per_year, args.test, args.skip_credits, args.skip_imdb)
     elif args.command == "embed":
         from embed import run_embed
         run_embed()
     elif args.command == "count":
-        print(f"Movies in ChromaDB: {count_movies()}")
+        logger.info("Movies in ChromaDB: %s", count_movies())
     elif args.command == "clear-db":
         from src.vector_store import delete_collection
         delete_collection()
-        print("ChromaDB collection deleted. Run `python main.py embed` to rebuild.")
+        logger.info("ChromaDB collection deleted. Run `python main.py embed` to rebuild.")
     elif args.command == "analyze":
         _run_analyze(args)
     elif args.command == "recommend":
         _run_recommend(args)
+    elif args.command == "explore":
+        from src.explorer import run_explore
+        run_explore()
 
 
 
 
 def _run_recommend(args: argparse.Namespace) -> None:
     from src.recommender import fetch_letterboxd_watched, get_taste_vector, \
-        recommend_for_group, taste_similarity
+        recommend_for_group, recommend_from_query, recommend_hybrid, taste_similarity
 
     user_weighted: list[dict[int, float]] = []
 
     if args.export:
-        print(f"Loading Letterboxd export: {args.export}...")
+        logger.info("Loading Letterboxd export: %s...", args.export)
         weighted = _export_to_weighted(args.export)
         if weighted:
-            print(f"  Found {len(weighted)} rated films.")
+            logger.info("  Found %d rated films.", len(weighted))
             vec, found_ids, total = get_taste_vector(weighted)
-            print(f"  → {len(found_ids)}/{total} in ChromaDB")
+            logger.info("  → %d/%d in ChromaDB", len(found_ids), total)
             if found_ids:
                 user_weighted.append(weighted)
     elif args.user:
         for username in args.user:
-            print(f"Scraping Letterboxd: {username}...")
-            weighted = fetch_letterboxd_watched(username)
-            print(f"  Found {len(weighted)} films. Checking embeddings...")
+            logger.info("Scraping Letterboxd: %s...", username)
+            weighted = fetch_letterboxd_watched(username, no_cache=args.no_cache)
+            logger.info("  Found %d films. Checking embeddings...", len(weighted))
             vec, found_ids, total = get_taste_vector(weighted)
-            print(f"  → {len(found_ids)}/{total} in ChromaDB")
+            logger.info("  → %d/%d in ChromaDB", len(found_ids), total)
             if found_ids:
                 user_weighted.append(weighted)
 
         if len(user_weighted) >= 2:
             sim = taste_similarity(user_weighted[0], user_weighted[1])
-            print(f"\nTaste similarity: {sim['similarity_pct']}% "
-                  f"(A: {sim['user_a_found']}/{sim['user_a_total']}, "
-                  f"B: {sim['user_b_found']}/{sim['user_b_total']})")
-    else:
+            logger.info("\nTaste similarity: %s%% "
+                        "(A: %s/%s, "
+                        "B: %s/%s)",
+                        sim['similarity_pct'],
+                        sim['user_a_found'], sim['user_a_total'],
+                        sim['user_b_found'], sim['user_b_total'])
+    elif args.ids:
         user_weighted.append({tid: 1.0 for tid in args.ids})
 
-    flattened = [tid for w in user_weighted for tid in w]
-    if not flattened:
-        print("No user data to recommend from.")
+    if not user_weighted and not args.query:
+        logger.info("No user data to recommend from.")
         return
 
-    print(f"\nFinding recommendations for {len(user_weighted)} user(s)...")
-    recs = recommend_for_group(user_weighted, n=args.n, min_vote_count=args.min_votes)
+    genre_filter = [g.strip() for g in args.genre.split(",") if g.strip()] if args.genre else None
 
+    if not user_weighted and args.query:
+        recs = recommend_from_query(
+            args.query, n=args.n, min_vote_count=args.min_votes,
+            diversity=args.diversity, genre_filter=genre_filter,
+            min_year=args.min_year, max_year=args.max_year,
+            min_rating=args.min_rating,
+            randomize=args.randomize,
+        )
+        _print_recommendations(recs)
+        return
+
+    logger.info("\nFinding recommendations for %d user(s)...", len(user_weighted))
+    effective_sigma = None if args.auto_sigma else args.sigma
+    if args.query:
+        recs = recommend_hybrid(
+            user_weighted, args.query,
+            n=args.n, min_vote_count=args.min_votes,
+            query_weight=args.query_weight,
+            sigma=effective_sigma, max_distance=args.max_distance,
+            diversity=args.diversity, genre_filter=genre_filter,
+            min_year=args.min_year, max_year=args.max_year,
+            min_rating=args.min_rating,
+            randomize=args.randomize,
+        )
+    else:
+        recs = recommend_for_group(
+            user_weighted, n=args.n, min_vote_count=args.min_votes,
+            sigma=effective_sigma, max_distance=args.max_distance,
+            diversity=args.diversity, genre_filter=genre_filter,
+            min_year=args.min_year, max_year=args.max_year,
+            min_rating=args.min_rating,
+            randomize=args.randomize,
+        )
+
+    _print_recommendations(recs)
+
+
+def _print_recommendations(recs: list[dict]) -> None:
     if not recs:
-        print("No recommendations found.")
         return
-
-    print(f"\n{'':4s}Title{'':35s}Year  Genres{'':20s}Rating  Score")
-    print("-" * 85)
+    out = []
+    out.append(f"\n{'':4s}Title{'':35s}Year  Genres{'':20s}Rating  Score")
+    out.append("-" * 85)
     for i, r in enumerate(recs, 1):
         title = r["title"][:38]
         genres = r["genres"][:22]
         year = r["year"]
         rating = r["vote_average"]
         score = r["rerank_score"]
-        print(f"{i:2d}. {title:38s} {year:<5d} {genres:22s} {rating:<5.1f}  {score:.4f}")
-    print()
+        out.append(f"{i:2d}. {title:38s} {year:<5d} {genres:22s} {rating:<5.1f}  {score:.4f}")
+    out.append("")
     for r in recs:
-        print(f"  {r['url']} — {r['title']}")
+        out.append(f"  {r['url']} — {r['title']}")
+    print("\n".join(out))
 
 
 def _export_to_weighted(export_dir: str) -> dict[int, float]:
@@ -133,24 +270,25 @@ def _export_to_weighted(export_dir: str) -> dict[int, float]:
     profile = resolve_tmdb_ids(profile, resolve_watchlist=False)
     weighted: dict[int, float] = {}
     for f in profile.watched:
-        if f.tmdb_id and f.rating is not None:
-            weighted[f.tmdb_id] = f.rating / 5.0
+        if f.tmdb_id:
+            w = f.rating / 5.0 if f.rating is not None else 0.6
+            weighted[f.tmdb_id] = w
     return weighted
 
 
 def _run_analyze(args: argparse.Namespace) -> None:
     from src.profile import parse_export, resolve_tmdb_ids, analyze_profile, format_profile_report
 
-    print("Parsing Letterboxd export...", flush=True)
+    logger.info("Parsing Letterboxd export...")
     profile = parse_export(args.export)
-    print(f"  {len(profile.watched)} watched, {len(profile.watchlist)} in watchlist", flush=True)
+    logger.info("  %d watched, %d in watchlist", len(profile.watched), len(profile.watchlist))
 
-    print("Resolving TMDB IDs...", flush=True)
-    profile = resolve_tmdb_ids(profile, resolve_watchlist=True)
+    logger.info("Resolving TMDB IDs...")
+    profile = resolve_tmdb_ids(profile, resolve_watchlist=False)
     resolved = sum(1 for f in profile.watched if f.tmdb_id)
-    print(f"  Resolved {resolved}/{len(profile.watched)} films", flush=True)
+    logger.info("  Resolved %d/%d films", resolved, len(profile.watched))
 
-    print("Analyzing profile...", flush=True)
+    logger.info("Analyzing profile...")
     stats = analyze_profile(profile)
 
     print()

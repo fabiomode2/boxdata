@@ -2,3 +2,11 @@ __pycache__/
 *.pyc
 .env
 venv/
+data/chroma_db/
+data/movies.jsonl
+data/old.jsonl
+data/cache/
+output/
+*.egg-info/
+viewer.html
+web/static/embedding_map.html

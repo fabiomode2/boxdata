@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import csv
+import logging
 import re
+import time
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import requests
+
 from src.collector import _tmdb_get
-from src.config import TMDB_BASE
+from src.config import HEADERS, TMDB_BASE
 from src.vector_store import get_collection
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,21 +41,69 @@ def _parse_csv(path: Path) -> list[dict[str, str]]:
 
 
 _SCRAPE_CACHE: dict[str, int | None] = {}
+_LB_SESSION: requests.Session | None = None
+_LETTERBOXD_BASE = "https://letterboxd.com"
 
 
-def _resolve_tmdb_search(name: str, year: int) -> int | None:
-    """Resolve via TMDB /search/movie."""
-    try:
-        data = _tmdb_get(f"{TMDB_BASE}/search/movie", {
-            "query": name,
-            "year": year,
+def _lb_session() -> requests.Session:
+    global _LB_SESSION
+    if _LB_SESSION is None:
+        _LB_SESSION = requests.Session()
+        _LB_SESSION.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         })
+    return _LB_SESSION
+
+
+def _resolve_from_uri(uri: str) -> int | None:
+    """Extract TMDB ID from a Letterboxd film page via data-tmdb-id."""
+    from bs4 import BeautifulSoup
+    slug_match = re.search(r'/film/([^/]+)/', uri)
+    if not slug_match:
+        return None
+    slug = slug_match.group(1)
+    cache_key = f"lb:{slug}"
+    cached = _SCRAPE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached if cached > 0 else None
+    try:
+        resp = _lb_session().get(f"{_LETTERBOXD_BASE}/film/{slug}/", timeout=15)
+        if resp.status_code != 200:
+            _SCRAPE_CACHE[cache_key] = -1
+            return None
+        soup = BeautifulSoup(resp.text, "html.parser")
+        el = soup.select_one("[data-tmdb-id]")
+        if el:
+            tid = int(el["data-tmdb-id"])
+            _SCRAPE_CACHE[cache_key] = tid
+            return tid
+        _SCRAPE_CACHE[cache_key] = -1
+        return None
+    except Exception:
+        _SCRAPE_CACHE[cache_key] = -1
+        return None
+
+
+def _resolve_via_tmdb(name: str, year: int) -> int | None:
+    """Resolve via TMDB /search/movie."""
+    cache_key = f"tmdb:{name}|{year}"
+    cached = _SCRAPE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached if cached > 0 else None
+    try:
+        data = _tmdb_get(
+            f"{TMDB_BASE}/search/movie",
+            params={"query": name, "year": year},
+        )
         results = data.get("results", [])
         if not results:
+            _SCRAPE_CACHE[cache_key] = -1
             return None
         for r in results:
             if r.get("title", "").lower().strip() == name.lower().strip():
+                _SCRAPE_CACHE[cache_key] = r["id"]
                 return r["id"]
+        _SCRAPE_CACHE[cache_key] = results[0]["id"]
         return results[0]["id"]
     except Exception:
         return None
@@ -131,20 +186,16 @@ def parse_export(export_dir: str) -> UserProfile:
 
 
 def resolve_tmdb_ids(profile: UserProfile, resolve_watchlist: bool = False) -> UserProfile:
-    """Resolve films to TMDB IDs, checking ChromaDB first, then TMDB search.
-
-    Args:
-        resolve_watchlist: also resolve watchlist (slow, only for full analysis).
-    """
+    """Resolve films to TMDB IDs via ChromaDB → URI (parallel) → TMDB search (parallel)."""
     chroma_index = _build_chromadb_index()
-    to_search = []
+    pending: list[WatchedFilm] = []
     for f in profile.watched:
         key = (f.name.lower().strip(), f.year)
         tid = chroma_index.get(key)
         if tid:
             f.tmdb_id = tid
         else:
-            to_search.append(f)
+            pending.append(f)
 
     if resolve_watchlist:
         for f in profile.watchlist:
@@ -153,18 +204,50 @@ def resolve_tmdb_ids(profile: UserProfile, resolve_watchlist: bool = False) -> U
             if tid:
                 f.tmdb_id = tid
             else:
-                to_search.append(f)
+                pending.append(f)
 
-    if not to_search:
+    if not pending:
         return profile
 
-    print(f"  {len(to_search)} films not in ChromaDB, searching TMDB...", flush=True)
-    for i, f in enumerate(to_search):
-        tid = _resolve_tmdb_search(f.name, f.year)
-        if tid:
-            f.tmdb_id = tid
-        if (i + 1) % 20 == 0:
-            print(f"    searched {i + 1}/{len(to_search)}", flush=True)
+    # Step 1: resolve via URI (Letterboxd page → data-tmdb-id) — no TMDB API
+    uri_films = [f for f in pending if f.uri]
+    n_uri = len(uri_films)
+    if uri_films:
+        logger.info("  Resolving %d films via Letterboxd URI...", n_uri)
+        done = 0
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            fut = {pool.submit(_resolve_from_uri, f.uri): f for f in uri_films}
+            for future in as_completed(fut):
+                f = fut[future]
+                try:
+                    tid = future.result()
+                    if tid:
+                        f.tmdb_id = tid
+                except Exception:
+                    pass
+                done += 1
+                if done % 50 == 0 or done == n_uri:
+                    logger.info("    resolved %d/%d via URI", done, n_uri)
+
+    # Step 2: TMDB search for remaining (parallel)
+    remaining = [f for f in pending if not f.tmdb_id]
+    n_rem = len(remaining)
+    if remaining:
+        logger.info("  Searching %d films via TMDB...", n_rem)
+        done = 0
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            fut = {pool.submit(_resolve_via_tmdb, f.name, f.year): f for f in remaining}
+            for future in as_completed(fut):
+                f = fut[future]
+                try:
+                    tid = future.result()
+                    if tid:
+                        f.tmdb_id = tid
+                except Exception:
+                    pass
+                done += 1
+                if done % 20 == 0 or done == n_rem:
+                    logger.info("    searched %d/%d via TMDB", done, n_rem)
 
     return profile
 

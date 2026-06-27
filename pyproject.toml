@@ -1,7 +1,7 @@
 [project]
 name = "boxdata"
 version = "0.1.0"
-description = "Movie recommendation system using TMDB + Gemini 2 embeddings + ChromaDB"
+description = "Movie recommendation system using TMDB + Ollama embeddings + ChromaDB"
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",
@@ -9,5 +9,9 @@ dependencies = [
     "python-dotenv>=1.0",
     "tqdm>=4.66",
     "chromadb>=0.5.0",
-    "google-genai>=1.0.0",
+    "beautifulsoup4>=4.12",
+    "ollama>=0.1",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]

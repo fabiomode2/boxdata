@@ -16,38 +16,55 @@ class Movie:
     cast: list[str] = field(default_factory=list)
     poster_path: str | None = None
     top_reviews: list[str] = field(default_factory=list)
+    imdb_id: str | None = None
+    imdb_rating: float | None = None
+    imdb_vote_count: int | None = None
+    metacritic_score: int | None = None
+    metacritic_review_count: int | None = None
+    interests: list[str] = field(default_factory=list)
+    origin_countries: list[str] = field(default_factory=list)
+    spoken_languages: list[str] = field(default_factory=list)
 
     def enriched_text(self) -> str:
         year = self.release_date.year if self.release_date else ""
         genres = ", ".join(self.genres) if self.genres else ""
+        interests = ", ".join(self.interests) if self.interests else ""
 
         parts = [f"{self.title} is a {year} film."]
         if genres:
             parts.append(f"Genres: {genres}.")
+        if interests:
+            parts.append(f"Subgenres: {interests}.")
         if self.director:
             parts.append(f"Directed by {self.director}.")
         if self.cast:
             parts.append(f"Starring {', '.join(self.cast[:5])}.")
+        if self.origin_countries:
+            parts.append(f"Origin: {', '.join(self.origin_countries)}.")
+        if self.spoken_languages:
+            parts.append(f"Languages: {', '.join(self.spoken_languages)}.")
         if self.overview:
             parts.append(self.overview)
 
-        if self.vote_count > 0:
-            if self.vote_average >= 8.0:
+        rating = self.imdb_rating or self.vote_average
+        votes = self.imdb_vote_count or self.vote_count
+        if votes > 0:
+            if rating >= 8.0:
                 quality = "widely acclaimed"
-            elif self.vote_average >= 6.0:
+            elif rating >= 6.0:
                 quality = "well-received"
-            elif self.vote_average >= 4.0:
+            elif rating >= 4.0:
                 quality = "mixed"
             else:
                 quality = "poorly received"
 
-            if self.vote_count >= 10000:
+            if votes >= 1000000:
                 audience = "a massive audience"
-            elif self.vote_count >= 5000:
+            elif votes >= 100000:
                 audience = "a very large audience"
-            elif self.vote_count >= 1000:
+            elif votes >= 10000:
                 audience = "a large audience"
-            elif self.vote_count >= 100:
+            elif votes >= 1000:
                 audience = "a modest audience"
             else:
                 audience = "a limited audience"
@@ -66,6 +83,11 @@ class Movie:
             "year": self.release_date.year if self.release_date else 0,
             "vote_average": self.vote_average,
             "vote_count": self.vote_count,
+            "imdb_rating": self.imdb_rating if self.imdb_rating is not None else 0.0,
+            "imdb_vote_count": self.imdb_vote_count if self.imdb_vote_count is not None else 0,
+            "metacritic_score": self.metacritic_score if self.metacritic_score is not None else 0,
+            "interests": ",".join(self.interests),
+            "poster_path": self.poster_path or "",
         }
 
     def to_dict(self) -> dict[str, Any]:

@@ -1,3 +1,4 @@
+import logging
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -6,6 +7,8 @@ from datetime import date
 
 from src.config import TMDB_BASE, HEADERS
 from src.models import Movie
+
+logger = logging.getLogger(__name__)
 
 GENRE_CACHE: dict[int, str] = {}
 _TMDB_LOCK = threading.Lock()
@@ -25,7 +28,7 @@ def _tmdb_get(url: str, params: dict | None = None) -> dict:
             _TMDB_LAST_CALL = time.time()
         if resp.status_code == 429:
             retry = int(resp.headers.get("Retry-After", 5))
-            print(f"  TMDB 429: retrying in {retry}s", flush=True)
+            logger.warning("TMDB 429: retrying in %ds", retry)
             time.sleep(retry)
             continue
         resp.raise_for_status()
@@ -46,34 +49,36 @@ def _genre_names(genre_ids: list[int]) -> list[str]:
     return [genres[gid] for gid in genre_ids if gid in genres]
 
 
-def _fetch_credits_one(tmdb_id: int) -> tuple[str | None, list[str]]:
-    """Fetch credits via `_tmdb_get` (shared rate limiter, no 429s)."""
-    url = f"{TMDB_BASE}/movie/{tmdb_id}/credits"
+def _fetch_movie_detail(tmdb_id: int) -> tuple[str | None, list[str], str | None]:
+    """Fetch movie detail + credits via `_tmdb_get` (shared rate limiter)."""
+    url = f"{TMDB_BASE}/movie/{tmdb_id}"
     try:
-        data = _tmdb_get(url)
+        data = _tmdb_get(url, {"append_to_response": "credits"})
     except requests.RequestException:
-        return None, []
+        return None, [], None
+    imdb_id = data.get("imdb_id")
+    credits = data.get("credits") or {}
     director = None
-    for crew in data.get("crew", []):
+    for crew in credits.get("crew", []):
         if crew["job"] == "Director":
             director = crew["name"]
             break
-    cast_names = [c["name"] for c in data.get("cast", [])[:5]]
-    return director, cast_names
+    cast_names = [c["name"] for c in credits.get("cast", [])[:5]]
+    return director, cast_names, imdb_id
 
 
-def _fetch_credits_batch(tmdb_ids: list[int]) -> dict[int, tuple[str | None, list[str]]]:
+def _fetch_credits_batch(tmdb_ids: list[int]) -> dict[int, tuple[str | None, list[str], str | None]]:
     if not tmdb_ids:
         return {}
     results = {}
     with ThreadPoolExecutor(max_workers=_CREDIT_WORKERS) as pool:
-        futures = {pool.submit(_fetch_credits_one, tid): tid for tid in tmdb_ids}
+        futures = {pool.submit(_fetch_movie_detail, tid): tid for tid in tmdb_ids}
         for future in as_completed(futures):
             tid = futures[future]
             try:
                 results[tid] = future.result()
             except Exception:
-                results[tid] = (None, [])
+                results[tid] = (None, [], None)
     return results
 
 
@@ -91,13 +96,17 @@ def fetch_movies_by_year(
     max_per_year: int = 100,
     skip_credits: bool = False,
     seen_ids: set[int] | None = None,
+    enrich: bool = True,
 ) -> list[Movie]:
-    """Fetch top N movies for a year from TMDB, then batch-fetch credits in parallel.
+    """Fetch top N movies for a year from TMDB, then batch-fetch credits + optional IMDb enrichment.
 
     Fetches 3x the target amount, then re-ranks by vote_count descending.
     TMDB's built-in "popularity" is a rolling black-box metric that can be
     inflated by recent controversy or engagement on a handful of votes, so
     we use raw vote count as the popularity signal instead.
+
+    When enrich=True, also fetches IMDb rating/votes, metacritic, interests
+    (subgenres), origin countries, and spoken languages via imdbapi.dev.
     """
     _load_genres()
     candidates: list[dict] = []
@@ -150,11 +159,12 @@ def fetch_movies_by_year(
     credits_map = {} if skip_credits else _fetch_credits_batch(tmdb_ids)
 
     movies: list[Movie] = []
+    imdb_id_map: dict[int, str] = {}
     for item in candidates:
         tmdb_id = item["id"]
-        director, cast = (None, []) if skip_credits else credits_map.get(tmdb_id, (None, []))
+        director, cast, imdb_id = (None, [], None) if skip_credits else credits_map.get(tmdb_id, (None, [], None))
         overview = item.get("overview", "") or ""
-        movies.append(Movie(
+        movie = Movie(
             tmdb_id=tmdb_id,
             title=item["title"],
             overview=overview,
@@ -165,6 +175,40 @@ def fetch_movies_by_year(
             director=director,
             cast=cast,
             poster_path=item.get("poster_path"),
-        ))
+            imdb_id=imdb_id,
+        )
+        movies.append(movie)
+        if imdb_id:
+            imdb_id_map[tmdb_id] = imdb_id
+
+    if enrich and imdb_id_map and not skip_credits:
+        _apply_imdb_enrichment(movies, imdb_id_map)
 
     return movies
+
+
+def _apply_imdb_enrichment(movies: list[Movie], imdb_id_map: dict[int, str]) -> None:
+    from src.imdb_enricher import extract_enrichment, fetch_enrichment
+
+    tmdb_to_imdb = {v: k for k, v in imdb_id_map.items()}
+    imdb_ids = list(imdb_id_map.values())
+    logger.info("  Enriching %d movies from IMDb API...", len(imdb_ids))
+
+    enriched = fetch_enrichment(imdb_ids)
+
+    found = 0
+    for movie in movies:
+        imdb_id = imdb_id_map.get(movie.tmdb_id)
+        if imdb_id and imdb_id in enriched:
+            data = extract_enrichment(enriched[imdb_id])
+            movie.imdb_rating = data["imdb_rating"]
+            movie.imdb_vote_count = data["imdb_vote_count"]
+            movie.metacritic_score = data["metacritic_score"]
+            movie.metacritic_review_count = data["metacritic_review_count"]
+            movie.interests = data["interests"]
+            movie.origin_countries = data["origin_countries"]
+            movie.spoken_languages = data["spoken_languages"]
+            found += 1
+
+    if found:
+        logger.info("  IMDb enrichment: %d/%d movies enriched", found, len(movies))
