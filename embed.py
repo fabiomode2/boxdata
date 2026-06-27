@@ -6,7 +6,6 @@ from pathlib import Path
 
 from src.indexer import index_movies
 from src.models import Movie
-from src.vector_store import count_movies
 
 logger = logging.getLogger(__name__)
 

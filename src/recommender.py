@@ -133,16 +133,14 @@ def _extract_film_page_entries(html: str) -> list[tuple[str, float]]:
 
 
 def _resolve_slug_parallel(slug: str) -> tuple[str, int | None]:
-    """Thread-safe slug→TMDB resolution using requests (not curl_cffi)."""
+    """Thread-safe slug→TMDB resolution using curl_cffi for browser impersonation."""
     with _SLUG_SEM:
-        import requests as req
         from bs4 import BeautifulSoup
 
         url = f"{LETTERBOXD_BASE}/film/{slug}/"
         try:
-            resp = req.get(url, timeout=20, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            })
+            scraper = _get_scraper()
+            resp = scraper.get(url, timeout=20)
             if resp.status_code != 200:
                 return slug, None
             soup = BeautifulSoup(resp.text, "html.parser")
@@ -315,12 +313,15 @@ def _load_user_history(
     return history
 
 
-def get_taste_vector(
+def _fetch_user_embeddings(
     weighted_ids: dict[int, float],
-) -> tuple[list[float], list[int], int]:
-    """Weighted-average embedding of ALL watched movies (single vector)."""
+) -> tuple[list[list[float]], list[float], list[int], int]:
+    """Fetch embeddings from ChromaDB for user's watched movies.
+
+    Returns (vectors, weights, found_ids, total_requested).
+    """
     if not weighted_ids:
-        return [], [], 0
+        return [], [], [], 0
 
     col = get_collection()
     meta_res = col.get(
@@ -336,17 +337,23 @@ def get_taste_vector(
         tid = int(tid_str)
         user_weight = weighted_ids[tid]
         emb = meta_res["embeddings"][i]
-
         if emb is None:
             continue
         emb_arr = emb.tolist() if hasattr(emb, "tolist") else emb
-
         vectors.append(emb_arr)
         weights.append(user_weight)
         found.append(tid)
 
+    return vectors, weights, found, len(weighted_ids)
+
+
+def get_taste_vector(
+    weighted_ids: dict[int, float],
+) -> tuple[list[float], list[int], int]:
+    """Weighted-average embedding of ALL watched movies (single vector)."""
+    vectors, weights, found, total = _fetch_user_embeddings(weighted_ids)
     if not vectors:
-        return [], [], len(weighted_ids)
+        return [], [], total
 
     dim = len(vectors[0])
     avg = [0.0] * dim
@@ -355,7 +362,7 @@ def get_taste_vector(
         for i in range(dim):
             avg[i] += vec[i] * (w / total_w)
 
-    return avg, found, len(weighted_ids)
+    return avg, found, total
 
 
 def _weighted_kmeans(
@@ -468,56 +475,30 @@ def get_taste_clusters(
     Returns list of (centroid_vector, cluster_weight) per cluster,
     plus list of found TMDB IDs and total count.
     """
-    if not weighted_ids:
-        return [], [], 0
-
-    col = get_collection()
-    meta_res = col.get(
-        ids=[str(tid) for tid in weighted_ids],
-        include=["embeddings"],
-    )
-
-    vectors: list[list[float]] = []
-    weights: list[float] = []
-    found: list[int] = []
-
-    for i, tid_str in enumerate(meta_res["ids"]):
-        tid = int(tid_str)
-        user_weight = weighted_ids[tid]
-        emb = meta_res["embeddings"][i]
-        if emb is None:
-            continue
-        emb_arr = emb.tolist() if hasattr(emb, "tolist") else emb
-
-        vectors.append(emb_arr)
-        weights.append(user_weight)
-        found.append(tid)
-
+    vectors, weights, found, total = _fetch_user_embeddings(weighted_ids)
     if not vectors:
-        return [], [], len(weighted_ids)
+        return [], [], total
 
     n = len(vectors)
     if n < 5:
-        # Too few movies — single mean centroid
         dim = len(vectors[0])
         centroid = [0.0] * dim
         total_w = sum(weights)
         for vec, w in zip(vectors, weights):
             for d in range(dim):
                 centroid[d] += vec[d] * (w / total_w)
-        return [(centroid, total_w)], found, len(weighted_ids)
+        return [(centroid, total_w)], found, total
     elif n < 15:
-        # Each movie is its own "cluster" (nearest-neighbor scoring)
         total_w = sum(weights)
         result = [(vec, w / total_w) for vec, w in zip(vectors, weights)]
         result.sort(key=lambda x: x[1], reverse=True)
-        return result, found, len(weighted_ids)
+        return result, found, total
     else:
         k = min(max_k, max(2, n // 10))
         clusters = _weighted_kmeans(vectors, weights, k)
         result = [(c, w) for c, w, _ in clusters]
         result.sort(key=lambda x: x[1], reverse=True)
-        return result, found, len(weighted_ids)
+        return result, found, total
 
 
 def _fetch_embeddings(tmdb_ids: list[int]) -> dict[int, list[float]]:
@@ -587,7 +568,7 @@ def taste_similarity(
     }
 
 
-def recommend_for_group(
+def _recommend_pipeline(
     user_weighted_list: list[dict[int, float]],
     n: int = 10,
     min_vote_count: int = 500,
@@ -599,15 +580,14 @@ def recommend_for_group(
     max_year: int | None = None,
     min_rating: float | None = 6.5,
     randomize: bool = False,
+    query_text: str | None = None,
+    query_weight: float = 0.0,
 ) -> list[dict[str, Any]]:
-    """Recommend movies for a group using kernel regression + geometric mean.
+    """Unified recommendation pipeline: profile-based, text-based, or hybrid.
 
-    Each user's taste is represented by their full watch history (not just
-    centroids). For each candidate, we predict each user's rating via
-    Nadaraya-Watson kernel regression over their history, then combine via
-    geometric mean across users.
-
-    If sigma is None, it is auto-calibrated per user via cross-validation.
+    Handles loading user histories, sigma calibration, multi-seed ChromaDB
+    discovery, kernel regression scoring, geometric mean consensus, optional
+    query blending, reranking, and MMR diversification.
     """
     exclude: set[int] = set()
     user_histories: list[list[tuple[list[float], float]]] = []
@@ -619,6 +599,13 @@ def recommend_for_group(
             user_histories.append(history)
 
     if not user_histories:
+        if query_text:
+            return recommend_from_query(
+                query_text, n=n, min_vote_count=min_vote_count,
+                diversity=diversity, genre_filter=genre_filter,
+                min_year=min_year, max_year=max_year,
+                min_rating=min_rating, randomize=randomize,
+            )
         return []
 
     # Auto-calibrate sigma per user if not specified
@@ -633,22 +620,33 @@ def recommend_for_group(
         logger.info("  Auto-calibrated sigmas: %s",
                      ", ".join(f"{s:.2f}" for s in sigmas))
 
-    # Build discovery seeds: each centroid + random exploration points
-    discovery_centroids: list[list[float]] = []
+    # Embed query text if provided
+    query_vec = None
+    query_vec_np = None
+    w = max(0.0, min(1.0, query_weight))
+    if query_text is not None:
+        from src.embedders import OllamaEmbedder
+        embedder = OllamaEmbedder()
+        query_vec = embedder.embed_batch([query_text])[0]
+        query_vec_np = np.array([query_vec])
+
+    # Build discovery seeds: centroids + optional query + random
+    discovery_seeds: list[list[float]] = []
     for wdict in user_weighted_list:
         clusters, _, _ = get_taste_clusters(wdict)
         for c, _ in clusters:
-            discovery_centroids.append(c)
+            discovery_seeds.append(c)
+    if query_vec is not None:
+        discovery_seeds.append(query_vec)
 
-    if not discovery_centroids:
-        discovery_centroids = [user_histories[0][0][0]]
+    if not discovery_seeds:
+        discovery_seeds = [user_histories[0][0][0]]
 
-    # Add random seed points for exploration (same dimensionality)
-    dim = len(discovery_centroids[0])
+    dim = len(discovery_seeds[0])
     rng = np.random.default_rng(None if randomize else 42)
     for _ in range(5):
         rand_vec = rng.normal(size=dim).tolist()
-        discovery_centroids.append(rand_vec)
+        discovery_seeds.append(rand_vec)
 
     # Pre-convert histories to numpy for batch scoring
     hist_np = [
@@ -661,20 +659,17 @@ def recommend_for_group(
 
     col = get_collection()
     total_db = col.count()
-
-    # Query ChromaDB from multiple seeds, merge with dedup
     pool_per_seed = max(n * 5, 15)
     seen: set[int] = set(exclude)
     batch_meta: list[tuple[int, dict, float, int, float, list[float]]] = []
 
-    # Batch query: all seeds at once
     multi_results = col.query(
-        query_embeddings=discovery_centroids,
+        query_embeddings=discovery_seeds,
         n_results=min(total_db, pool_per_seed),
         include=["embeddings", "metadatas"],
     )
 
-    for q_idx in range(len(discovery_centroids)):
+    for q_idx in range(len(discovery_seeds)):
         for j, tid_str in enumerate(multi_results["ids"][q_idx]):
             tid = int(tid_str)
             if tid in seen:
@@ -710,12 +705,19 @@ def recommend_for_group(
     product = np.prod(np.maximum(user_preds, eps) ** 2, axis=0)
     consensus = product ** (1.0 / user_preds.shape[0])
 
+    # Query similarity (vectorized cosine) if hybrid
+    query_sims = None
+    if query_vec_np is not None:
+        q_norm = np.linalg.norm(query_vec_np)
+        c_norms = np.linalg.norm(cand_embs, axis=1, keepdims=True).flatten()
+        query_sims = (cand_embs @ query_vec_np.flatten()) / (c_norms * q_norm + 1e-12)
+
     candidates: list[dict[str, Any]] = []
     for idx, (tid, meta, vote_avg, vote_cnt, mc_bonus, cand_arr) in enumerate(batch_meta):
-        # Bayesian average smoothing toward 6.0 for low-vote movies
-        bayes_avg = (vote_avg * vote_cnt + 6.0 * 200) / (vote_cnt + 200)
-        quality = (bayes_avg / 10.0) ** 2
-        sim = float(consensus[idx]) * quality
+        if query_sims is not None:
+            sim = (1.0 - w) * float(consensus[idx]) + w * float(query_sims[idx])
+        else:
+            sim = float(consensus[idx])
         pp = meta.get("poster_path", "")
         poster_url = f"https://image.tmdb.org/t/p/w200{pp}" if pp else ""
         candidates.append({
@@ -739,6 +741,28 @@ def recommend_for_group(
     return reranked[:n]
 
 
+def recommend_for_group(
+    user_weighted_list: list[dict[int, float]],
+    n: int = 10,
+    min_vote_count: int = 500,
+    sigma: float | None = None,
+    max_distance: float = -1.0,
+    diversity: float = 0.0,
+    genre_filter: list[str] | None = None,
+    min_year: int | None = None,
+    max_year: int | None = None,
+    min_rating: float | None = 6.5,
+    randomize: bool = False,
+) -> list[dict[str, Any]]:
+    """Recommend movies for a group via kernel regression + geometric mean."""
+    return _recommend_pipeline(
+        user_weighted_list, n=n, min_vote_count=min_vote_count,
+        sigma=sigma, max_distance=max_distance, diversity=diversity,
+        genre_filter=genre_filter, min_year=min_year, max_year=max_year,
+        min_rating=min_rating, randomize=randomize,
+    )
+
+
 def _matches_genre_filter(meta_genres: str, genre_filter: list[str] | None) -> bool:
     """Check if meta genres contain any of the requested genres (case-insensitive)."""
     if not genre_filter:
@@ -748,9 +772,9 @@ def _matches_genre_filter(meta_genres: str, genre_filter: list[str] | None) -> b
 
 
 def _matches_year_filter(year: int, min_year: int | None, max_year: int | None) -> bool:
-    if min_year and year < min_year:
+    if min_year is not None and year < min_year:
         return False
-    if max_year and year > max_year:
+    if max_year is not None and year > max_year:
         return False
     return True
 
@@ -836,145 +860,16 @@ def recommend_hybrid(
 ) -> list[dict[str, Any]]:
     """Profile-based + free-text query combined, with kernel regression + geometric mean.
 
-    Each candidate's per-user score is a kernel regression prediction.
-    Consensus via geometric mean, then blended with query-text similarity.
     query_weight=0 → pure profile consensus, query_weight=1 → pure text search.
-
     If sigma is None, it is auto-calibrated per user via cross-validation.
     """
-    from src.embedders import OllamaEmbedder
-
-    exclude: set[int] = set()
-    user_histories: list[list[tuple[list[float], float]]] = []
-    for wdict in user_weighted_list:
-        exclude.update(wdict.keys())
-        history = _load_user_history(wdict)
-        if history:
-            user_histories.append(history)
-
-    if not user_histories:
-        return recommend_from_query(query_text, n=n, min_vote_count=min_vote_count)
-
-    # Auto-calibrate sigma per user if not specified
-    sigmas: list[float] = []
-    for history in user_histories:
-        if sigma is None:
-            s = _calibrate_sigma_cv(history, max_distance=max_distance)
-            sigmas.append(s)
-        else:
-            sigmas.append(sigma)
-    if sigma is None:
-        logger.info("  Auto-calibrated sigmas: %s",
-                     ", ".join(f"{s:.2f}" for s in sigmas))
-
-    embedder = OllamaEmbedder()
-    query_vec = embedder.embed_batch([query_text])[0]
-    query_vec_np = np.array([query_vec])
-    w = max(0.0, min(1.0, query_weight))
-
-    # Build discovery seeds: centroids + query + random
-    discovery_seeds: list[list[float]] = []
-    for wdict in user_weighted_list:
-        clusters, _, _ = get_taste_clusters(wdict)
-        for c, _ in clusters:
-            discovery_seeds.append(c)
-    discovery_seeds.append(query_vec)
-
-    dim = len(discovery_seeds[0])
-    rng = np.random.default_rng(None if randomize else 42)
-    for _ in range(5):
-        rand_vec = rng.normal(size=dim).tolist()
-        discovery_seeds.append(rand_vec)
-
-    # Pre-convert histories to numpy for batch scoring
-    hist_np = [
-        (
-            np.array([h[0] for h in hist]),
-            np.array([h[1] for h in hist], dtype=float),
-        )
-        for hist in user_histories
-    ]
-
-    col = get_collection()
-    total_db = col.count()
-    pool_per_seed = max(n * 5, 15)
-
-    seen: set[int] = set(exclude)
-    batch_meta: list[tuple[int, dict, float, int, float, list[float]]] = []
-
-    multi_results = col.query(
-        query_embeddings=discovery_seeds,
-        n_results=min(total_db, pool_per_seed),
-        include=["embeddings", "metadatas"],
+    return _recommend_pipeline(
+        user_weighted_list, n=n, min_vote_count=min_vote_count,
+        sigma=sigma, max_distance=max_distance, diversity=diversity,
+        genre_filter=genre_filter, min_year=min_year, max_year=max_year,
+        min_rating=min_rating, randomize=randomize,
+        query_text=query_text, query_weight=query_weight,
     )
-
-    for q_idx in range(len(discovery_seeds)):
-        for j, tid_str in enumerate(multi_results["ids"][q_idx]):
-            tid = int(tid_str)
-            if tid in seen:
-                continue
-            seen.add(tid)
-            meta = multi_results["metadatas"][q_idx][j]
-            cand_emb = multi_results["embeddings"][q_idx][j]
-            if cand_emb is None:
-                continue
-            cand_arr = cand_emb.tolist() if hasattr(cand_emb, "tolist") else cand_emb
-            vote_avg, vote_cnt, mc_bonus = _best_vote_data(meta)
-            if vote_cnt < min_vote_count:
-                continue
-            if not _matches_genre_filter(meta.get("genres", ""), genre_filter):
-                continue
-            if not _matches_year_filter(meta.get("year", 0), min_year, max_year):
-                continue
-            if min_rating is not None and vote_avg < min_rating:
-                continue
-            batch_meta.append((tid, meta, vote_avg, vote_cnt, mc_bonus, cand_arr))
-
-    if not batch_meta:
-        return []
-
-    # Batch scoring: all candidates × all users at once
-    cand_embs = np.array([b[5] for b in batch_meta])
-    user_preds = np.array([
-        _predict_rating_batch(cand_embs, hembs, hrats, sigmas[j], max_distance)
-        for j, (hembs, hrats) in enumerate(hist_np)
-    ])
-
-    eps = 1e-6
-    product = np.prod(np.maximum(user_preds, eps) ** 2, axis=0)
-    consensus = product ** (1.0 / user_preds.shape[0])
-
-    # Query similarity (vectorized cosine)
-    q_norm = np.linalg.norm(query_vec_np)
-    c_norms = np.linalg.norm(cand_embs, axis=1, keepdims=True).flatten()
-    query_sims = (cand_embs @ query_vec_np.flatten()) / (c_norms * q_norm + 1e-12)
-
-    candidates: list[dict[str, Any]] = []
-    for idx, (tid, meta, vote_avg, vote_cnt, mc_bonus, cand_arr) in enumerate(batch_meta):
-        blended = (1.0 - w) * float(consensus[idx]) + w * float(query_sims[idx])
-        bayes_avg = (vote_avg * vote_cnt + 6.0 * 200) / (vote_cnt + 200)
-        quality = (bayes_avg / 10.0) ** 2
-        pp = meta.get("poster_path", "")
-        poster_url = f"https://image.tmdb.org/t/p/w200{pp}" if pp else ""
-        candidates.append({
-            "tmdb_id": tid,
-            "title": meta.get("title", "Unknown"),
-            "genres": meta.get("genres", ""),
-            "year": meta.get("year", 0),
-            "vote_average": vote_avg,
-            "vote_count": vote_cnt,
-            "metacritic_bonus": mc_bonus,
-            "similarity_score": round(blended * quality, 4),
-            "rerank_score": 0.0,
-            "url": f"https://letterboxd.com/tmdb/{tid}/",
-            "poster": poster_url,
-            "_emb": cand_arr,
-        })
-
-    reranked = _rerank_candidates(candidates, alpha=0.8)
-    if diversity > 0.0:
-        return _mmr_diversify(reranked, n, lam=1.0 - diversity)
-    return reranked[:n]
 
 
 def recommend_from_query(
@@ -1019,8 +914,6 @@ def recommend_from_query(
         if min_rating is not None and vote_avg < min_rating:
             continue
 
-        bayes_avg = (vote_avg * vote_cnt + 6.0 * 200) / (vote_cnt + 200)
-        quality = (bayes_avg / 10.0) ** 2
         pp = meta.get("poster_path", "")
         poster_url = f"https://image.tmdb.org/t/p/w200{pp}" if pp else ""
         candidates.append({
@@ -1031,7 +924,7 @@ def recommend_from_query(
             "vote_average": vote_avg,
             "vote_count": vote_cnt,
             "metacritic_bonus": mc_bonus,
-            "similarity_score": round(similarity * quality, 4),
+            "similarity_score": round(similarity, 4),
             "rerank_score": 0.0,
             "url": f"https://letterboxd.com/tmdb/{tid}/",
             "poster": poster_url,

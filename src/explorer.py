@@ -7,7 +7,6 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from hdbscan import HDBSCAN
-from sklearn.preprocessing import StandardScaler
 from umap import UMAP
 
 from src.vector_store import get_collection

@@ -4,6 +4,7 @@ import csv
 import logging
 import re
 import time
+import threading
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -43,6 +44,7 @@ def _parse_csv(path: Path) -> list[dict[str, str]]:
 _SCRAPE_CACHE: dict[str, int | None] = {}
 _LB_SESSION: requests.Session | None = None
 _LETTERBOXD_BASE = "https://letterboxd.com"
+_LB_SEM = threading.Semaphore(5)
 
 
 def _lb_session() -> requests.Session:
@@ -66,22 +68,23 @@ def _resolve_from_uri(uri: str) -> int | None:
     cached = _SCRAPE_CACHE.get(cache_key)
     if cached is not None:
         return cached if cached > 0 else None
-    try:
-        resp = _lb_session().get(f"{_LETTERBOXD_BASE}/film/{slug}/", timeout=15)
-        if resp.status_code != 200:
+    with _LB_SEM:
+        try:
+            resp = _lb_session().get(f"{_LETTERBOXD_BASE}/film/{slug}/", timeout=15)
+            if resp.status_code != 200:
+                _SCRAPE_CACHE[cache_key] = -1
+                return None
+            soup = BeautifulSoup(resp.text, "html.parser")
+            el = soup.select_one("[data-tmdb-id]")
+            if el:
+                tid = int(el["data-tmdb-id"])
+                _SCRAPE_CACHE[cache_key] = tid
+                return tid
             _SCRAPE_CACHE[cache_key] = -1
             return None
-        soup = BeautifulSoup(resp.text, "html.parser")
-        el = soup.select_one("[data-tmdb-id]")
-        if el:
-            tid = int(el["data-tmdb-id"])
-            _SCRAPE_CACHE[cache_key] = tid
-            return tid
-        _SCRAPE_CACHE[cache_key] = -1
-        return None
-    except Exception:
-        _SCRAPE_CACHE[cache_key] = -1
-        return None
+        except Exception:
+            _SCRAPE_CACHE[cache_key] = -1
+            return None
 
 
 def _resolve_via_tmdb(name: str, year: int) -> int | None:
@@ -109,8 +112,14 @@ def _resolve_via_tmdb(name: str, year: int) -> int | None:
         return None
 
 
+_CHROMA_INDEX: dict[tuple[str, int], int] | None = None
+
+
 def _build_chromadb_index() -> dict[tuple[str, int], int]:
-    """Build (title_lower, year) → tmdb_id index from ChromaDB."""
+    """Build (title_lower, year) → tmdb_id index from ChromaDB (cached)."""
+    global _CHROMA_INDEX
+    if _CHROMA_INDEX is not None:
+        return _CHROMA_INDEX
     col = get_collection()
     all_data = col.get(include=["metadatas"])
     index: dict[tuple[str, int], int] = {}
@@ -120,6 +129,7 @@ def _build_chromadb_index() -> dict[tuple[str, int], int]:
         year = meta.get("year") or 0
         if title and year:
             index[(title, year)] = int(tid_str)
+    _CHROMA_INDEX = index
     return index
 
 

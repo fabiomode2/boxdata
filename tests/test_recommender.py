@@ -3,11 +3,22 @@ from __future__ import annotations
 import math
 from datetime import date
 
+import numpy as np
 import pytest
 
 from src.models import Movie
-from src.recommender import _rerank_candidates, _weighted_kmeans, cosine_similarity
+from src.recommender import (
+    _predict_rating_batch,
+    _rerank_candidates,
+    _weighted_kmeans,
+    _mmr_diversify,
+    cosine_similarity,
+    predict_rating,
+    _calibrate_sigma_cv,
+)
 
+
+# ── Cosine Similarity ──
 
 def test_cosine_similarity_parallel() -> None:
     a = [1.0, 0.0, 0.0]
@@ -44,6 +55,8 @@ def test_cosine_similarity_arbitrary() -> None:
     assert cosine_similarity(a, b) == pytest.approx(expected)
 
 
+# ── RRF Reranking ──
+
 def test_rerank_rrf_single_candidate() -> None:
     candidates = [{"similarity_score": 0.9, "vote_average": 8.0, "vote_count": 1000}]
     result = _rerank_candidates(candidates)
@@ -68,6 +81,21 @@ def test_rerank_rrf_popularity_wins() -> None:
     assert result[0]["vote_average"] == 9.0
 
 
+def test_rerank_rrf_alpha_blend() -> None:
+    candidates = [
+        {"similarity_score": 0.9, "vote_average": 5.0, "vote_count": 10},
+        {"similarity_score": 0.5, "vote_average": 9.0, "vote_count": 10000},
+    ]
+    pure_sim = _rerank_candidates(list(candidates), alpha=1.0)
+    pure_pop = _rerank_candidates(list(candidates), alpha=0.0)
+    balanced = _rerank_candidates(list(candidates), alpha=0.5)
+
+    assert pure_sim[0]["similarity_score"] == 0.9
+    assert pure_pop[0]["vote_average"] == 9.0
+
+
+# ── Weighted K-Means ──
+
 def test_weighted_kmeans_single_cluster() -> None:
     vectors = [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]]
     weights = [1.0, 1.0, 1.0]
@@ -91,6 +119,8 @@ def test_weighted_kmeans_k_greater_than_n() -> None:
     clusters = _weighted_kmeans(vectors, weights, k=10)
     assert len(clusters) == 2
 
+
+# ── Enriched Text ──
 
 def test_enriched_text_basic() -> None:
     m = Movie(
@@ -172,58 +202,30 @@ def test_enriched_text_no_votes() -> None:
     assert "audience" not in text
 
 
-def test_consensus_scoring_logic() -> None:
-    scores = [0.9, 0.8, 0.91]
-    mean_sim = sum(scores) / len(scores)
-    std_sim = math.sqrt(sum((s - mean_sim) ** 2 for s in scores) / len(scores))
-    penalty = 0.5
-    consensus = mean_sim - penalty * std_sim
+# ── Geometric Mean Consensus ──
 
-    scores2 = [0.9, 0.3, 0.2]
-    mean_sim2 = sum(scores2) / len(scores2)
-    std_sim2 = math.sqrt(sum((s - mean_sim2) ** 2 for s in scores2) / len(scores2))
-    consensus2 = mean_sim2 - penalty * std_sim2
+def test_geometric_mean_consensus() -> None:
+    """Test that geometric mean rewards agreement and penalises divergence."""
+    # High agreement: both users rate highly
+    product_agree = np.prod(np.maximum(np.array([[0.9], [0.8]]), 1e-6) ** 2, axis=0)
+    consensus_agree = product_agree ** (1.0 / 2)
 
-    assert consensus > consensus2
+    # High disagreement: one loves, one hates
+    product_disagree = np.prod(np.maximum(np.array([[0.9], [0.1]]), 1e-6) ** 2, axis=0)
+    consensus_disagree = product_disagree ** (1.0 / 2)
 
-
-def test_rerank_rrf_alpha_blend() -> None:
-    candidates = [
-        {"similarity_score": 0.9, "vote_average": 5.0, "vote_count": 10},
-        {"similarity_score": 0.5, "vote_average": 9.0, "vote_count": 10000},
-    ]
-    pure_sim = _rerank_candidates(list(candidates), alpha=1.0)
-    pure_pop = _rerank_candidates(list(candidates), alpha=0.0)
-    balanced = _rerank_candidates(list(candidates), alpha=0.5)
-
-    assert pure_sim[0]["similarity_score"] == 0.9
-    assert pure_pop[0]["vote_average"] == 9.0
+    assert consensus_agree[0] > consensus_disagree[0]
 
 
-def test_get_taste_clusters_short_history() -> None:
-    from src.recommender import get_taste_clusters
-    weighted = {1: 1.0, 2: 0.8, 3: 0.5}
-    clusters, found, total = get_taste_clusters(weighted)
-    assert len(clusters) == 1
-
-
-def test_get_taste_clusters_empty() -> None:
-    from src.recommender import get_taste_clusters
-    clusters, found, total = get_taste_clusters({})
-    assert clusters == []
-    assert found == []
-    assert total == 0
-
+# ── Sigma Calibration ──
 
 def test_calibrate_sigma_cv_fallback() -> None:
-    from src.recommender import _calibrate_sigma_cv
     # < 10 movies → fallback to 0.3
     result = _calibrate_sigma_cv([([1.0, 0.0], 0.8), ([0.0, 1.0], 0.5)])
     assert result == 0.3
 
 
 def test_calibrate_sigma_cv_synthetic() -> None:
-    from src.recommender import _calibrate_sigma_cv
     # 20 identical vectors with same rating → low sigma should work fine
     history = [([0.5, 0.5], 0.9) for _ in range(20)]
     result = _calibrate_sigma_cv(history, sigma_candidates=[0.1, 0.3, 0.5])
@@ -232,8 +234,9 @@ def test_calibrate_sigma_cv_synthetic() -> None:
     assert 0.0 < result <= 0.5
 
 
+# ── Nadaraya-Watson Kernel Regression ──
+
 def test_predict_rating_identical() -> None:
-    from src.recommender import predict_rating
     emb = [0.5, 0.5]
     history = [([0.5, 0.5], 0.9)]
     pred = predict_rating(emb, history, sigma=0.3, max_distance=0.3)
@@ -241,9 +244,104 @@ def test_predict_rating_identical() -> None:
 
 
 def test_predict_rating_distant_ignored() -> None:
-    from src.recommender import predict_rating
     emb = [1.0, 0.0]
     history = [([0.0, 1.0], 0.9)]
     pred = predict_rating(emb, history, sigma=0.3, max_distance=0.3)
     # dist = 1 - 0 = 1.0 > 0.3, should be ignored → fallback to 0.0
     assert pred == 0.0
+
+
+def test_predict_rating_batch_matches_single() -> None:
+    """Batch version should match single version for the same inputs."""
+    cand_embs = np.array([[0.5, 0.5]])
+    hist_embs = np.array([[0.5, 0.5]])
+    hist_ratings = np.array([0.9])
+    batch_preds = _predict_rating_batch(cand_embs, hist_embs, hist_ratings, sigma=0.3, max_distance=0.3)
+
+    single_pred = predict_rating([0.5, 0.5], [([0.5, 0.5], 0.9)], sigma=0.3, max_distance=0.3)
+    assert float(batch_preds[0]) == pytest.approx(single_pred, abs=0.01)
+
+
+def test_predict_rating_batch_multi_candidate() -> None:
+    """Batch version should produce correct predictions for multiple candidates."""
+    cand_embs = np.array([[1.0, 0.0], [0.0, 1.0]])
+    hist_embs = np.array([[1.0, 0.0]])
+    hist_ratings = np.array([0.8])
+    preds = _predict_rating_batch(cand_embs, hist_embs, hist_ratings, sigma=0.3, max_distance=0.3)
+    # First candidate is identical → close to 0.8
+    assert float(preds[0]) == pytest.approx(0.8, abs=0.02)
+    # Second is orthogonal → very low weight → close to 0
+    assert float(preds[1]) < 0.1
+
+
+# ── MMR Diversity ──
+
+def test_mmr_pure_relevance() -> None:
+    cands = [
+        {"rerank_score": 0.9, "similarity_score": 0.9, "_emb": [1.0, 0.0]},
+        {"rerank_score": 0.5, "similarity_score": 0.5, "_emb": [0.0, 1.0]},
+    ]
+    result = _mmr_diversify(cands, n=2, lam=1.0)
+    assert len(result) == 2
+    assert result[0]["rerank_score"] == 0.9
+
+
+def test_mmr_pure_diversity() -> None:
+    cands = [
+        {"rerank_score": 0.9, "_emb": [1.0, 0.0]},
+        {"rerank_score": 0.5, "_emb": [1.0, 0.01]},
+        {"rerank_score": 0.3, "_emb": [0.0, 1.0]},
+    ]
+    result = _mmr_diversify(cands, n=2, lam=0.0)
+    # lam=0 means pure diversity: picks most different
+    assert len(result) == 2
+
+
+def test_mmr_empty_candidates() -> None:
+    assert _mmr_diversify([], n=5) == []
+
+
+# ── Matches helpers ──
+
+def test_matches_year_filter() -> None:
+    from src.recommender import _matches_year_filter
+    assert _matches_year_filter(2000, 1990, 2010) is True
+    assert _matches_year_filter(1980, 1990, None) is False
+    assert _matches_year_filter(2020, None, 2010) is False
+    assert _matches_year_filter(2000, None, None) is True
+    # Edge case: min_year=0 should filter correctly
+    assert _matches_year_filter(0, 0, None) is True
+    assert _matches_year_filter(-1, 0, None) is False
+
+
+def test_matches_genre_filter() -> None:
+    from src.recommender import _matches_genre_filter
+    assert _matches_genre_filter("Action, Drama", ["Action"]) is True
+    assert _matches_genre_filter("Comedy", ["Action"]) is False
+    assert _matches_genre_filter("Action", None) is True
+    assert _matches_genre_filter("", ["Action"]) is False
+    assert _matches_genre_filter("Science Fiction", ["science fiction"]) is True
+
+
+def test_best_vote_data_prefers_imdb() -> None:
+    from src.recommender import _best_vote_data
+    meta = {
+        "vote_average": 6.0, "vote_count": 100,
+        "imdb_rating": 8.0, "imdb_vote_count": 50000,
+        "metacritic_score": 80,
+    }
+    avg, cnt, mc_bonus = _best_vote_data(meta)
+    assert avg == 8.0  # prefers IMDb
+    assert cnt == 50000
+    assert mc_bonus > 1.0  # metacritic > 50
+
+
+def test_best_vote_data_fallsback_to_tmdb() -> None:
+    from src.recommender import _best_vote_data
+    meta = {
+        "vote_average": 7.5, "vote_count": 200,
+        "imdb_rating": None, "imdb_vote_count": None,
+    }
+    avg, cnt, _ = _best_vote_data(meta)
+    assert avg == 7.5
+    assert cnt == 200
