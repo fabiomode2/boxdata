@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Collect movies from TMDB and save to JSONL for later embedding."""
-import argparse
 import json
 import logging
 from dataclasses import asdict
@@ -13,7 +12,7 @@ from src.collector import fetch_movies_by_year
 
 logger = logging.getLogger(__name__)
 
-DATA_FILE = Path(__file__).parent / "data" / "movies.jsonl"
+DATA_FILE = Path(__file__).resolve().parent.parent / "data" / "movies.jsonl"
 
 
 def load_collected_ids() -> set[int]:
@@ -60,15 +59,3 @@ def run_collect(
                 tqdm.write(f"  {year}: +{len(movies)}")
 
     logger.info("Done. +%d new. Total in JSONL: %d", total_new, len(collected_ids))
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Collect movies from TMDB to JSONL")
-    parser.add_argument("--start", type=int, default=1900)
-    parser.add_argument("--end", type=int, default=None)
-    parser.add_argument("--max-per-year", type=int, default=100)
-    parser.add_argument("--test", action="store_true", help="Only 2 years")
-    parser.add_argument("--skip-credits", action="store_true", help="Skip TMDB credits call")
-    parser.add_argument("--skip-imdb", action="store_true", help="Skip IMDb API enrichment")
-    args = parser.parse_args()
-    run_collect(args.start, args.end, args.max_per_year, args.test, args.skip_credits, args.skip_imdb)

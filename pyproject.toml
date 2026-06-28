@@ -19,5 +19,8 @@ dependencies = [
     "uvicorn>=0.24",
 ]
 
+[project.scripts]
+boxdata = "main:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

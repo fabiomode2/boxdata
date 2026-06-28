@@ -14,7 +14,8 @@ python main.py collect --test       # fetch 2 years for testing
 python main.py embed                # generate embeddings → ChromaDB
 python main.py explore              # UMAP + HDBSCAN visualization
 python main.py recommend --user alice bob   # group recs
-python web/app.py                   # web demo on port 8080
+cd frontend && npm run dev           # React dev server (Vite)
+docker compose up -d                 # API + Ollama on Oracle VPS
 ```
 
 ## Commands
@@ -70,7 +71,11 @@ Bidirectional top-3 mean nearest-neighbour between two users' movie embeddings.
 
 ## Project Structure
 ```
-main.py collect.py embed.py src/
+main.py               CLI entry point (argparse dispatcher)
+pyproject.toml        Project config + [project.scripts] entry
+src/
+├── collect_runner.py TMDB collection runner
+├── embed_runner.py   Embedding runner
 ├── collector.py      TMDB fetcher (rate-limited, parallel credits)
 ├── imdb_enricher.py  IMDb API enrichment (batch + individual)
 ├── models.py         Movie dataclass (enriched_text, metadata)
@@ -80,7 +85,10 @@ main.py collect.py embed.py src/
 ├── profile.py        Letterboxd CSV parser + TMDB resolver
 ├── recommender.py    Clustering, kernel regression, MMR, scraper
 └── explorer.py       UMAP + HDBSCAN + Plotly
-web/app.py            FastAPI demo (port 8080)
+api/server.py         FastAPI JSON API (port 8000)
+Dockerfile.api        Docker image for the API
+docker-compose.yml    Ollama + API stack for Oracle VPS
+frontend/             React + Vite frontend (deploy to Vercel)
 tests/                Pytest suite (31 tests)
 data/chroma_db/       Vector store (gitignored)
 data/cache/           Scraped profiles (gitignored)
@@ -114,6 +122,18 @@ misc/                 Experimental files (viewer.html)
 11. Caching `_build_chromadb_index()` avoids reloading all metadata on every TMDB resolution
 
 ## Changelog
+
+### Jun 2026 — Web App Redesign (React + Vite + Docker)
+- Replaced `web/app.py` (FastAPI + server-side templates) with `frontend/` (React + Vite, deploy to Vercel)
+- Created `api/server.py` — new FastAPI JSON API for the frontend
+- Created `Dockerfile.api` + `docker-compose.yml` for Oracle VPS deployment
+- Removed `web/` directory
+
+### Jun 2026 — Project Structure Cleanup
+- Moved `collect.py` → `src/collect_runner.py` and `embed.py` → `src/embed_runner.py`
+- Fixed `embed.py` bug (missing `count_movies` import when run standalone)
+- Removed stale `src/boxdata.egg-info/`
+- Added `[project.scripts]` entry point to `pyproject.toml`
 
 ### Jun 2026 — Refactor & Bugfixes
 - Unified `recommend_for_group`/`recommend_hybrid` into `_recommend_pipeline` (-160 LOC)

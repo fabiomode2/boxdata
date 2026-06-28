@@ -8,4 +8,6 @@ data/old.jsonl
 data/cache/
 output/
 *.egg-info/
-web/static/embedding_map.html
+node_modules/
+frontend/dist/
+.vercel/

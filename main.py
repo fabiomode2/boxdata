@@ -144,10 +144,10 @@ def main() -> None:
         return
 
     if args.command == "collect":
-        from collect import run_collect
+        from src.collect_runner import run_collect
         run_collect(args.start, args.end, args.max_per_year, args.test, args.skip_credits, args.skip_imdb)
     elif args.command == "embed":
-        from embed import run_embed
+        from src.embed_runner import run_embed
         run_embed()
     elif args.command == "count":
         logger.info("Movies in ChromaDB: %s", count_movies())
