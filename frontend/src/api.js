@@ -13,14 +13,10 @@ export async function resolveAvatar(username) {
   }
 }
 
-const API_KEY = import.meta.env.VITE_API_KEY || ''
-
 export async function fetchRecommendations(body) {
-  const headers = { 'Content-Type': 'application/json' }
-  if (API_KEY) headers['X-API-Key'] = API_KEY
   const res = await fetch(`${API_URL}/api/recommend`, {
     method: 'POST',
-    headers,
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
