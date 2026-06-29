@@ -34,6 +34,7 @@ def _get_scraper() -> curl_requests.Session:
 
 
 _CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
+_CACHE_TTL = 86400  # 24 hours
 
 
 def _cache_path(username: str) -> Path:
@@ -44,6 +45,10 @@ def _load_cache(username: str) -> dict[int, float] | None:
     path = _cache_path(username)
     if not path.exists():
         return None
+    age = time.time() - path.stat().st_mtime
+    if age > _CACHE_TTL:
+        path.unlink(missing_ok=True)
+        return None
     raw = json.loads(path.read_text())
     if not raw:
         path.unlink(missing_ok=True)
@@ -53,7 +58,9 @@ def _load_cache(username: str) -> dict[int, float] | None:
 
 def _save_cache(username: str, data: dict[int, float]) -> None:
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    _cache_path(username).write_text(json.dumps(data, indent=2))
+    path = _cache_path(username)
+    path.write_text(json.dumps(data, indent=2))
+    path.chmod(0o600)
 
 
 def fetch_letterboxd_watched(

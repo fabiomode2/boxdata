@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from src.recommender import (
     fetch_letterboxd_watched,
@@ -23,27 +24,44 @@ from src.vector_store import count_movies
 
 logger = logging.getLogger(__name__)
 
+API_KEY = os.getenv("API_KEY")
+
+
+async def verify_api_key(x_api_key: str | None = Header(None)):
+    if API_KEY and x_api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+
 app = FastAPI(title="BoxData API")
 
+origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "https://tudominio.vercel.app").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 class RecommendRequest(BaseModel):
-    users: list[str] = []
+    users: list[str] = Field(default=[], max_length=5)
     query: str | None = None
-    n: int = 10
-    diversity: float = 0.0
+    n: int = Field(default=10, ge=1, le=50)
+    diversity: float = Field(default=0.0, ge=0.0, le=1.0)
     genre: list[str] | None = None
-    query_weight: float = 0.3
+    query_weight: float = Field(default=0.3, ge=0.0, le=1.0)
     min_year: int | None = None
     max_year: int | None = None
-    min_rating: float = 6.5
+    min_rating: float = Field(default=6.5, ge=0.0, le=10.0)
     randomize: bool = False
     refresh: bool = False
+
+    @field_validator("users")
+    @classmethod
+    def validate_usernames(cls, users: list[str]) -> list[str]:
+        for u in users:
+            if not re.match(r"^[a-zA-Z0-9_-]{1,50}$", u):
+                raise ValueError(f"Invalid letterboxd username: {u}")
+        return users
 
 class MovieResult(BaseModel):
     tmdb_id: int
@@ -60,7 +78,7 @@ async def health():
     return {"status": "ok", "movies": count_movies()}
 
 @app.post("/api/recommend", response_model=list[MovieResult])
-async def recommend(req: RecommendRequest):
+async def recommend(req: RecommendRequest, _auth=Depends(verify_api_key)):
     user_weighted: list[dict[int, float]] = []
 
     if req.users:

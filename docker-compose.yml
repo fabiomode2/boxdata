@@ -16,11 +16,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+    env_file:
+      - .env
     environment:
       - OLLAMA_HOST=http://ollama:11434
-      - TMDB_API_KEY=${TMDB_API_KEY}
-      - TMDB_TOKEN=${TMDB_TOKEN}
-      - API_TOKEN=${TMDB_TOKEN}
     volumes:
       - ./data:/app/data
     depends_on:

@@ -179,6 +179,7 @@ function clampYear(v) {
   return String(Math.max(YEAR_MIN, Math.min(YEAR_MAX, Math.abs(n))))
 }
 
+
 export default function App() {
   const [locale, setLocale] = useState('en')
   const t = LOC[locale].app
