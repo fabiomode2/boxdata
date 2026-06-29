@@ -9,13 +9,13 @@ services:
           cpus: '1.0'
           memory: 4G
     restart: unless-stopped
+    networks:
+      - proxy-network
 
   api:
     build:
       context: .
       dockerfile: Dockerfile.api
-    ports:
-      - "8080:8000"
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - TMDB_API_KEY=${TMDB_API_KEY}
@@ -31,6 +31,12 @@ services:
           cpus: '0.5'
           memory: 1G
     restart: unless-stopped
+    networks:
+      - proxy-network
 
 volumes:
   ollama_data:
+
+networks:
+  proxy-network:
+    external: true

@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import re
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -68,18 +69,22 @@ def fetch_letterboxd_watched(
     if not no_cache:
         cached = _load_cache(username)
         if cached is not None:
-            logger.info("  (cached) %d films", len(cached))
+            print(f"[BOXSCRAPE] Cache hit: {len(cached)} films for {username}", file=sys.stderr, flush=True)
             return cached
 
     scraper = _get_scraper()
     slug_ratings: dict[str, float] = {}
+    print(f"[BOXSCRAPE] Starting scrape for {username}", file=sys.stderr, flush=True)
 
     for page in range(1, _MAX_PAGES + 1):
         if len(slug_ratings) >= max_films:
             break
         url = f"{LETTERBOXD_BASE}/{username}/films/page/{page}/"
+        print(f"[BOXSCRAPE] GET {url}", file=sys.stderr, flush=True)
         resp = scraper.get(url, timeout=20)
+        print(f"[BOXSCRAPE] HTTP {resp.status_code} (len={len(resp.text)})", file=sys.stderr, flush=True)
         if resp.status_code != 200:
+            print(f"[BOXSCRAPE] BODY={resp.text[:300]}", file=sys.stderr, flush=True)
             break
         page_entries = _extract_film_page_entries(resp.text)
         if not page_entries:

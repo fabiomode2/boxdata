@@ -22,6 +22,24 @@ def load_collected_ids() -> set[int]:
         return {json.loads(line)["tmdb_id"] for line in f}
 
 
+def _max_year_in_jsonl() -> int | None:
+    if not DATA_FILE.exists():
+        return None
+    max_y = 0
+    with open(DATA_FILE) as f:
+        for line in f:
+            d = json.loads(line)
+            rd = d.get("release_date")
+            if rd and len(rd) >= 4:
+                try:
+                    y = int(rd[:4])
+                    if y > max_y:
+                        max_y = y
+                except ValueError:
+                    pass
+    return max_y if max_y else None
+
+
 def run_collect(
     start: int, end: int | None, max_per_year: int, test: bool,
     skip_credits: bool, skip_imdb: bool,
@@ -29,12 +47,18 @@ def run_collect(
     if end is None:
         end = date.today().year
 
+    collected_ids = load_collected_ids()
+    logger.info("Known movies in JSONL: %d", len(collected_ids))
+
+    if not test and collected_ids:
+        last_year = _max_year_in_jsonl()
+        if last_year is not None and last_year >= start:
+            logger.info("Resuming from year %d (was %d)", last_year, start)
+            start = last_year
+
     years = list(range(start, end + 1))
     if test:
         years = years[:2]
-
-    collected_ids = load_collected_ids()
-    logger.info("Known movies in JSONL: %d", len(collected_ids))
 
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     total_new = 0

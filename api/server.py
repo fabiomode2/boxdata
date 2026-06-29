@@ -43,6 +43,7 @@ class RecommendRequest(BaseModel):
     max_year: int | None = None
     min_rating: float = 6.5
     randomize: bool = False
+    refresh: bool = False
 
 class MovieResult(BaseModel):
     tmdb_id: int
@@ -64,7 +65,7 @@ async def recommend(req: RecommendRequest):
 
     if req.users:
         for username in req.users:
-            weighted = fetch_letterboxd_watched(username)
+            weighted = fetch_letterboxd_watched(username, no_cache=req.refresh)
             vec, found_ids, total = get_taste_vector(weighted)
             if found_ids:
                 user_weighted.append(weighted)

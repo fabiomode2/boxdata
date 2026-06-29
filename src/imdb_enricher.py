@@ -86,9 +86,9 @@ def extract_enrichment(data: dict) -> dict:
         "metacritic_review_count": meta.get("reviewCount"),
         "interests": interests,
         "origin_countries": [
-            c["name"] for c in (data.get("originCountries") or []) if isinstance(c, dict)
+            c.get("name") for c in (data.get("originCountries") or []) if isinstance(c, dict) and c.get("name")
         ],
         "spoken_languages": [
-            l["name"] for l in (data.get("spokenLanguages") or []) if isinstance(l, dict)
+            l.get("name") for l in (data.get("spokenLanguages") or []) if isinstance(l, dict) and l.get("name")
         ],
     }
