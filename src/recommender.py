@@ -13,7 +13,6 @@ from typing import Any
 
 import numpy as np
 from curl_cffi import requests as curl_requests
-
 from src.vector_store import get_collection
 
 logger = logging.getLogger(__name__)
@@ -29,7 +28,7 @@ _SLUG_SEM = threading.Semaphore(5)
 def _get_scraper() -> curl_requests.Session:
     global _session
     if _session is None:
-        _session = curl_requests.Session(impersonate="chrome120")
+        _session = curl_requests.Session(impersonate="safari17_0")
     return _session
 
 
@@ -45,6 +44,9 @@ def _load_cache(username: str) -> dict[int, float] | None:
     if not path.exists():
         return None
     raw = json.loads(path.read_text())
+    if not raw:
+        path.unlink(missing_ok=True)
+        return None
     return {int(k): v for k, v in raw.items()}
 
 
