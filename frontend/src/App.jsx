@@ -1,26 +1,30 @@
-import { useState, useRef } from 'react'
-import { getAvatarUrl, getNextAvatarUrl, fetchRecommendations } from './api'
+import { useState, useRef, useEffect } from 'react'
+import { resolveAvatar, fetchRecommendations } from './api'
 import { LocaleContext, LOC } from './locale'
 import HowItWorks from './HowItWorks'
 import './App.css'
 
 function UserChip({ user, onRemove, t }) {
-  const [src, setSrc] = useState(user.avatar)
+  const [url, setUrl] = useState(null)
   const [failed, setFailed] = useState(false)
 
-  function handleError() {
-    const next = getNextAvatarUrl(user.name, src)
-    if (next) {
-      setSrc(next)
-    } else {
-      setFailed(true)
-    }
-  }
+  useEffect(() => {
+    let cancelled = false
+    setFailed(false)
+    setUrl(null)
+    resolveAvatar(user.name).then(avatarUrl => {
+      if (!cancelled) {
+        if (avatarUrl) setUrl(avatarUrl)
+        else setFailed(true)
+      }
+    })
+    return () => { cancelled = true }
+  }, [user.name])
 
   return (
     <span className="chip">
-      {!failed ? (
-        <img className="chip-avatar" src={src} alt="" onError={handleError} />
+      {!failed && url ? (
+        <img className="chip-avatar" src={url} alt="" onError={() => setFailed(true)} />
       ) : (
         <span className="chip-avatar chip-avatar--fallback">
           {user.name[0].toUpperCase()}
@@ -208,7 +212,7 @@ export default function App() {
     const name = raw.trim().toLowerCase()
     if (!name || users.some(u => u.name === name)) return
     setUserInput('')
-    setUsers(prev => [...prev, { name, avatar: getAvatarUrl(name) }])
+    setUsers(prev => [...prev, { name }])
   }
 
   function removeUser(name) {

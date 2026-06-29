@@ -34,7 +34,7 @@ async def verify_api_key(x_api_key: str | None = Header(None)):
 
 app = FastAPI(title="BoxData API")
 
-origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "https://tudominio.vercel.app").split(",") if o.strip()]
+origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "https://boxdata.vercel.app").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
