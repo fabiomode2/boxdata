@@ -1,5 +1,3 @@
-const API_URL = import.meta.env.VITE_API_URL || ''
-
 export async function resolveAvatar(username) {
   try {
     const res = await fetch(
@@ -14,7 +12,7 @@ export async function resolveAvatar(username) {
 }
 
 export async function fetchRecommendations(body) {
-  const res = await fetch(`${API_URL}/api/recommend`, {
+  const res = await fetch(`/api/recommend`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
