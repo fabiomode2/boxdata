@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -79,6 +80,10 @@ async def health():
 
 @app.post("/api/recommend", response_model=list[MovieResult])
 async def recommend(req: RecommendRequest, _auth=Depends(verify_api_key)):
+    t0 = time.perf_counter()
+    users_str = ",".join(req.users) if req.users else "query-only"
+    print(f"\n--- /api/recommend [{users_str}] n={req.n} refresh={req.refresh} ---", file=sys.stderr, flush=True)
+
     user_weighted: list[dict[int, float]] = []
 
     if req.users:
@@ -113,7 +118,12 @@ async def recommend(req: RecommendRequest, _auth=Depends(verify_api_key)):
             randomize=req.randomize,
         )
     else:
+        total_t = time.perf_counter() - t0
+        print(f"  ⏱  TOTAL: {total_t:.2f}s (no users, no query → empty)", file=sys.stderr, flush=True)
         return []
+
+    total_t = time.perf_counter() - t0
+    print(f"  ⏱  TOTAL: {total_t:.2f}s | {len(recs)} movies returned", file=sys.stderr, flush=True)
 
     return [
         MovieResult(

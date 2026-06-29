@@ -18,6 +18,19 @@ from src.vector_store import get_collection
 
 logger = logging.getLogger(__name__)
 
+_TIMERS: list[tuple[str, float]] = []
+
+def _timer_start(label: str) -> None:
+    _TIMERS.append((label, time.perf_counter()))
+
+def _timer_stop() -> str | None:
+    if not _TIMERS:
+        return None
+    label, start = _TIMERS.pop()
+    elapsed = time.perf_counter() - start
+    print(f"  ⏱  {label}: {elapsed:.2f}s", file=sys.stderr, flush=True)
+    return label
+
 LETTERBOXD_BASE = "https://letterboxd.com"
 _REQUEST_DELAY = 1.0
 _MAX_PAGES = 10
@@ -73,16 +86,19 @@ def fetch_letterboxd_watched(
     - rated-7 = 3.5/5 → 0.7
     - no explicit rating → 0.6 (assumed liked)
     """
+    _timer_start(f"fetch_letterboxd_watched({username})")
     if not no_cache:
         cached = _load_cache(username)
         if cached is not None:
             print(f"[BOXSCRAPE] Cache hit: {len(cached)} films for {username}", file=sys.stderr, flush=True)
+            _timer_stop()
             return cached
 
     scraper = _get_scraper()
     slug_ratings: dict[str, float] = {}
     print(f"[BOXSCRAPE] Starting scrape for {username}", file=sys.stderr, flush=True)
 
+    _timer_start("  scrape pages")
     for page in range(1, _MAX_PAGES + 1):
         if len(slug_ratings) >= max_films:
             break
@@ -101,7 +117,9 @@ def fetch_letterboxd_watched(
                 break
             slug_ratings[slug] = max(slug_ratings.get(slug, 0), rating_norm)
         time.sleep(_REQUEST_DELAY)
+    _timer_stop()
 
+    _timer_start("  resolve slugs → TMDB")
     weighted: dict[int, float] = {}
     with ThreadPoolExecutor(max_workers=10) as pool:
         fut = {pool.submit(_resolve_slug_parallel, slug): slug for slug in slug_ratings}
@@ -115,8 +133,10 @@ def fetch_letterboxd_watched(
                     weighted[tmdb_id] = max(existing, weight)
             except Exception:
                 pass
+    _timer_stop()
 
     _save_cache(username, weighted)
+    _timer_stop()
     return weighted
 
 
@@ -306,7 +326,9 @@ def _load_user_history(
     weighted_ids: dict[int, float],
 ) -> list[tuple[list[float], float]]:
     """Fetch embeddings from ChromaDB and return [(embedding, rating), ...]."""
+    _timer_start("  load_user_history")
     if not weighted_ids:
+        _timer_stop()
         return []
 
     col = get_collection()
@@ -324,6 +346,7 @@ def _load_user_history(
             emb_arr = emb.tolist() if hasattr(emb, "tolist") else emb
             history.append((emb_arr, user_rating))
 
+    _timer_stop()
     return history
 
 
@@ -365,8 +388,10 @@ def get_taste_vector(
     weighted_ids: dict[int, float],
 ) -> tuple[list[float], list[int], int]:
     """Weighted-average embedding of ALL watched movies (single vector)."""
+    _timer_start(f"  get_taste_vector ({len(weighted_ids)} ids)")
     vectors, weights, found, total = _fetch_user_embeddings(weighted_ids)
     if not vectors:
+        _timer_stop()
         return [], [], total
 
     dim = len(vectors[0])
@@ -375,6 +400,7 @@ def get_taste_vector(
     for vec, w in zip(vectors, weights):
         for i in range(dim):
             avg[i] += vec[i] * (w / total_w)
+    _timer_stop()
 
     return avg, found, total
 
@@ -603,6 +629,9 @@ def _recommend_pipeline(
     discovery, kernel regression scoring, geometric mean consensus, optional
     query blending, reranking, and MMR diversification.
     """
+    _timer_start("_recommend_pipeline total")
+
+    _timer_start("  load user histories")
     exclude: set[int] = set()
     user_histories: list[list[tuple[list[float], float]]] = []
 
@@ -611,18 +640,23 @@ def _recommend_pipeline(
         history = _load_user_history(wdict)
         if history:
             user_histories.append(history)
+    _timer_stop()
 
     if not user_histories:
         if query_text:
-            return recommend_from_query(
+            result = recommend_from_query(
                 query_text, n=n, min_vote_count=min_vote_count,
                 diversity=diversity, genre_filter=genre_filter,
                 min_year=min_year, max_year=max_year,
                 min_rating=min_rating, randomize=randomize,
             )
+            _timer_stop()
+            return result
+        _timer_stop()
         return []
 
     # Auto-calibrate sigma per user if not specified
+    _timer_start("  sigma calibration")
     sigmas: list[float] = []
     for history in user_histories:
         if sigma is None:
@@ -633,8 +667,10 @@ def _recommend_pipeline(
     if sigma is None:
         logger.info("  Auto-calibrated sigmas: %s",
                      ", ".join(f"{s:.2f}" for s in sigmas))
+    _timer_stop()
 
     # Embed query text if provided
+    _timer_start("  query embedding")
     query_vec = None
     query_vec_np = None
     w = max(0.0, min(1.0, query_weight))
@@ -643,8 +679,10 @@ def _recommend_pipeline(
         embedder = OllamaEmbedder()
         query_vec = embedder.embed_batch([query_text])[0]
         query_vec_np = np.array([query_vec])
+    _timer_stop()
 
     # Build discovery seeds: centroids + optional query + random
+    _timer_start("  discovery seeds + ChromaDB query")
     discovery_seeds: list[list[float]] = []
     for wdict in user_weighted_list:
         clusters, _, _ = get_taste_clusters(wdict)
@@ -706,8 +744,12 @@ def _recommend_pipeline(
             batch_meta.append((tid, meta, vote_avg, vote_cnt, mc_bonus, cand_arr))
 
     if not batch_meta:
+        _timer_stop()
+        _timer_stop()
         return []
+    _timer_stop()
 
+    _timer_start("  batch scoring + consensus")
     # Batch scoring: all candidates × all users at once
     cand_embs = np.array([b[5] for b in batch_meta])
     user_preds = np.array([
@@ -748,8 +790,12 @@ def _recommend_pipeline(
             "poster": poster_url,
             "_emb": cand_arr,
         })
+    _timer_stop()
 
+    _timer_start("  rerank + MMR")
     reranked = _rerank_candidates(candidates, alpha=0.8)
+    _timer_stop()
+    _timer_stop()
     if diversity > 0.0:
         return _mmr_diversify(reranked, n, lam=1.0 - diversity)
     return reranked[:n]
@@ -898,10 +944,14 @@ def recommend_from_query(
     randomize: bool = False,
 ) -> list[dict[str, Any]]:
     """Embed a free-text query and return top-N similar movies from ChromaDB."""
+    _timer_start("recommend_from_query total")
     from src.embedders import OllamaEmbedder
+    _timer_start("  embed query")
     embedder = OllamaEmbedder()
     vec = embedder.embed_batch([query_text])[0]
+    _timer_stop()
 
+    _timer_start("  ChromaDB query + filter")
     col = get_collection()
     results = col.query(
         query_embeddings=[vec],
@@ -944,8 +994,12 @@ def recommend_from_query(
             "poster": poster_url,
             "_emb": cand_arr,
         })
+    _timer_stop()
 
+    _timer_start("  rerank")
     reranked = _rerank_candidates(candidates, alpha=0.9)
+    _timer_stop()
+    _timer_stop()
     if diversity > 0.0:
         return _mmr_diversify(reranked, n, lam=1.0 - diversity)
     return reranked[:n]
