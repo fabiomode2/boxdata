@@ -65,7 +65,7 @@ def _show_help(parser: argparse.ArgumentParser) -> None:
 
   OPCIONES COMUNES:
     --n N                 Número de resultados (default: 10)
-    --min-votes N         Votaciones mínimas en TMDB (default: 10)
+    --min-votes N         Votaciones mínimas en TMDB (default: 2000)
     --sigma SIGMA         Suavizado del kernel (default: 0.3)
     --max-distance DIST   Distancia máxima para considerar historial
                           (0-1, -1=sin límite, default: 0.3)
@@ -112,7 +112,7 @@ def main() -> None:
     rec_ids.add_argument("--export", type=str, metavar="DIR",
                          help="Path to Letterboxd export directory")
     rec_p.add_argument("--n", type=int, default=10, help="Number of recommendations")
-    rec_p.add_argument("--min-votes", type=int, default=10,
+    rec_p.add_argument(    "--min-votes", type=int, default=2000,
                         help="Minimum vote_count filter")
     rec_p.add_argument("--no-cache", action="store_true",
                         help="Ignore cached scraped profiles")

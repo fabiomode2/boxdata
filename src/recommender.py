@@ -19,6 +19,11 @@ from src.vector_store import get_collection
 logger = logging.getLogger(__name__)
 
 _TIMERS: list[tuple[str, float]] = []
+_SIGMA_CACHE: dict[frozenset, float] = {}
+
+
+def _sigma_cache_key(wdict: dict[int, float]) -> frozenset:
+    return frozenset(wdict.items())
 
 def _timer_start(label: str) -> None:
     _TIMERS.append((label, time.perf_counter()))
@@ -611,7 +616,7 @@ def taste_similarity(
 def _recommend_pipeline(
     user_weighted_list: list[dict[int, float]],
     n: int = 10,
-    min_vote_count: int = 500,
+    min_vote_count: int = 2000,
     sigma: float | None = None,
     max_distance: float = -1.0,
     diversity: float = 0.0,
@@ -655,15 +660,22 @@ def _recommend_pipeline(
         _timer_stop()
         return []
 
-    # Auto-calibrate sigma per user if not specified
+    # Auto-calibrate sigma per user if not specified (cached)
     _timer_start("  sigma calibration")
     sigmas: list[float] = []
-    for history in user_histories:
-        if sigma is None:
-            s = _calibrate_sigma_cv(history, max_distance=max_distance)
-            sigmas.append(s)
-        else:
+    for h_idx, history in enumerate(user_histories):
+        if sigma is not None:
             sigmas.append(sigma)
+        else:
+            wdict = user_weighted_list[h_idx]
+            key = _sigma_cache_key(wdict)
+            cached = _SIGMA_CACHE.get(key)
+            if cached is not None:
+                sigmas.append(cached)
+            else:
+                s = _calibrate_sigma_cv(history, max_distance=max_distance)
+                _SIGMA_CACHE[key] = s
+                sigmas.append(s)
     if sigma is None:
         logger.info("  Auto-calibrated sigmas: %s",
                      ", ".join(f"{s:.2f}" for s in sigmas))
@@ -681,13 +693,26 @@ def _recommend_pipeline(
         query_vec_np = np.array([query_vec])
     _timer_stop()
 
-    # Build discovery seeds: centroids + optional query + random
+    # Build discovery seeds: 1 weighted centroid per user + optional query + random
     _timer_start("  discovery seeds + ChromaDB query")
     discovery_seeds: list[list[float]] = []
-    for wdict in user_weighted_list:
-        clusters, _, _ = get_taste_clusters(wdict)
-        for c, _ in clusters:
-            discovery_seeds.append(c)
+    for history in user_histories:
+        if not history:
+            continue
+        dim = len(history[0][0])
+        total_w = sum(r for _, r in history)
+        centroid = [0.0] * dim
+        for vec, rating in history:
+            w = rating / total_w
+            for i in range(dim):
+                centroid[i] += vec[i] * w
+        discovery_seeds.append(centroid)
+        if randomize:
+            # Add perturbed copies of each centroid for more variety
+            rng_pert = np.random.default_rng()
+            for _ in range(3):
+                noise = rng_pert.normal(0, 0.15, size=dim).tolist()
+                discovery_seeds.append([c + n for c, n in zip(centroid, noise)])
     if query_vec is not None:
         discovery_seeds.append(query_vec)
 
@@ -695,8 +720,9 @@ def _recommend_pipeline(
         discovery_seeds = [user_histories[0][0][0]]
 
     dim = len(discovery_seeds[0])
+    n_random = 12 if randomize else 4
     rng = np.random.default_rng(None if randomize else 42)
-    for _ in range(5):
+    for _ in range(n_random):
         rand_vec = rng.normal(size=dim).tolist()
         discovery_seeds.append(rand_vec)
 
@@ -711,7 +737,7 @@ def _recommend_pipeline(
 
     col = get_collection()
     total_db = col.count()
-    pool_per_seed = max(n * 5, 15)
+    pool_per_seed = min(max(n * 5, 15), 40)
     seen: set[int] = set(exclude)
     batch_meta: list[tuple[int, dict, float, int, float, list[float]]] = []
 
@@ -804,7 +830,7 @@ def _recommend_pipeline(
 def recommend_for_group(
     user_weighted_list: list[dict[int, float]],
     n: int = 10,
-    min_vote_count: int = 500,
+    min_vote_count: int = 2000,
     sigma: float | None = None,
     max_distance: float = -1.0,
     diversity: float = 0.0,
@@ -840,19 +866,13 @@ def _matches_year_filter(year: int, min_year: int | None, max_year: int | None) 
 
 
 def _best_vote_data(meta: dict) -> tuple[float, int, float]:
-    """Return (best_avg, best_count, metacritic_bonus) preferring IMDb over TMDB.
+    """Return (avg, count, metacritic_bonus) using TMDB data only.
 
-    For the popularity multiplier, uses imdb_rating if available (larger sample),
-    falls back to tmdb vote_average. Adds a metacritic signal as bonus.
+    Uses TMDB vote_average and vote_count (not IMDb) for consistent filtering
+    and popularity scoring.
     """
-    imdb_avg = meta.get("imdb_rating")
-    imdb_cnt = meta.get("imdb_vote_count")
-    tmdb_avg = meta.get("vote_average", 0)
-    tmdb_cnt = meta.get("vote_count", 0)
-
-    # IMDb fields may be 0 when not enriched — treat 0 as missing
-    avg = imdb_avg if (imdb_avg is not None and imdb_avg > 0) else tmdb_avg
-    cnt = imdb_cnt if (imdb_cnt is not None and imdb_cnt > 0) else tmdb_cnt
+    avg = meta.get("vote_average", 0)
+    cnt = meta.get("vote_count", 0)
 
     mc = meta.get("metacritic_score")
     mcb = 1.0 + max(0, (mc or 50) - 50) / 500.0 if mc is not None else 1.0
@@ -907,7 +927,7 @@ def recommend_hybrid(
     user_weighted_list: list[dict[int, float]],
     query_text: str,
     n: int = 10,
-    min_vote_count: int = 500,
+    min_vote_count: int = 2000,
     query_weight: float = 0.3,
     sigma: float | None = None,
     max_distance: float = -1.0,
@@ -935,7 +955,7 @@ def recommend_hybrid(
 def recommend_from_query(
     query_text: str,
     n: int = 10,
-    min_vote_count: int = 500,
+    min_vote_count: int = 2000,
     diversity: float = 0.0,
     genre_filter: list[str] | None = None,
     min_year: int | None = None,

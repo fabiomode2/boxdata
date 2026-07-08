@@ -47,6 +47,7 @@ class RecommendRequest(BaseModel):
     users: list[str] = Field(default=[], max_length=5)
     query: str | None = None
     n: int = Field(default=10, ge=1, le=50)
+    min_vote_count: int = Field(default=2000, ge=0, le=500000)
     diversity: float = Field(default=0.0, ge=0.0, le=1.0)
     genre: list[str] | None = None
     query_weight: float = Field(default=0.3, ge=0.0, le=1.0)
@@ -97,14 +98,15 @@ async def recommend(req: RecommendRequest, _auth=Depends(verify_api_key)):
 
     if not user_weighted and req.query:
         recs = recommend_from_query(
-            req.query, n=req.n, diversity=req.diversity,
-            genre_filter=genre_filter, min_year=req.min_year,
-            max_year=req.max_year, min_rating=req.min_rating,
-            randomize=req.randomize,
+            req.query, n=req.n, min_vote_count=req.min_vote_count,
+            diversity=req.diversity, genre_filter=genre_filter,
+            min_year=req.min_year, max_year=req.max_year,
+            min_rating=req.min_rating, randomize=req.randomize,
         )
     elif user_weighted and req.query:
         recs = recommend_hybrid(
             user_weighted, req.query, n=req.n,
+            min_vote_count=req.min_vote_count,
             query_weight=req.query_weight, diversity=req.diversity,
             genre_filter=genre_filter, min_year=req.min_year,
             max_year=req.max_year, min_rating=req.min_rating,
@@ -112,10 +114,10 @@ async def recommend(req: RecommendRequest, _auth=Depends(verify_api_key)):
         )
     elif user_weighted:
         recs = recommend_for_group(
-            user_weighted, n=req.n, diversity=req.diversity,
-            genre_filter=genre_filter, min_year=req.min_year,
-            max_year=req.max_year, min_rating=req.min_rating,
-            randomize=req.randomize,
+            user_weighted, n=req.n, min_vote_count=req.min_vote_count,
+            diversity=req.diversity, genre_filter=genre_filter,
+            min_year=req.min_year, max_year=req.max_year,
+            min_rating=req.min_rating, randomize=req.randomize,
         )
     else:
         total_t = time.perf_counter() - t0
