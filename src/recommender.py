@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 from curl_cffi import requests as curl_requests
+from curl_cffi import CurlError
 from src.vector_store import get_collection
 
 logger = logging.getLogger(__name__)
@@ -136,8 +137,8 @@ def fetch_letterboxd_watched(
                 if tmdb_id:
                     existing = weighted.get(tmdb_id, 0)
                     weighted[tmdb_id] = max(existing, weight)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Slug resolution failed for '%s': %s", slug, e)
     _timer_stop()
 
     _save_cache(username, weighted)
@@ -186,8 +187,8 @@ def _resolve_slug_parallel(slug: str) -> tuple[str, int | None]:
             el = soup.select_one('[data-tmdb-id]')
             if el:
                 return slug, int(el["data-tmdb-id"])
-        except Exception:
-            pass
+        except CurlError as e:
+            logger.warning("Slug resolution error for '%s': %s", slug, e)
         return slug, None
 
 
@@ -200,13 +201,13 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
-def _get_embedding(tmdb_id: int) -> list[float] | None:
-    col = get_collection()
-    res = col.get(str(tmdb_id), include=["embeddings"])
-    emb = res["embeddings"]
-    if emb is not None and len(emb) > 0 and emb[0] is not None:
-        return emb[0].tolist() if hasattr(emb[0], "tolist") else emb[0]
-    return None
+def _cosine_similarity_np(a: np.ndarray, b: np.ndarray) -> float:
+    """Numpy-vectorized cosine similarity for two single vectors."""
+    na = np.linalg.norm(a)
+    nb = np.linalg.norm(b)
+    if na < 1e-12 or nb < 1e-12:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
 
 
 def predict_rating(
@@ -330,26 +331,18 @@ def _calibrate_sigma_cv(
 def _load_user_history(
     weighted_ids: dict[int, float],
 ) -> list[tuple[list[float], float]]:
-    """Fetch embeddings from ChromaDB and return [(embedding, rating), ...]."""
+    """Fetch embeddings from ChromaDB and return [(embedding, rating), ...].
+    
+    Uses _fetch_user_embeddings internally and batch-fetches in chunks of
+    999 to respect ChromaDB's per-call ID limit.
+    """
     _timer_start("  load_user_history")
     if not weighted_ids:
         _timer_stop()
         return []
 
-    col = get_collection()
-    meta_res = col.get(
-        ids=[str(tid) for tid in weighted_ids],
-        include=["embeddings"],
-    )
-
-    history: list[tuple[list[float], float]] = []
-    for i, tid_str in enumerate(meta_res["ids"]):
-        tid = int(tid_str)
-        user_rating = weighted_ids[tid]
-        emb = meta_res["embeddings"][i]
-        if emb is not None:
-            emb_arr = emb.tolist() if hasattr(emb, "tolist") else emb
-            history.append((emb_arr, user_rating))
+    vectors, weights, found, _ = _fetch_user_embeddings(weighted_ids)
+    history = [(vec, w) for vec, w in zip(vectors, weights)]
 
     _timer_stop()
     return history
@@ -361,30 +354,31 @@ def _fetch_user_embeddings(
     """Fetch embeddings from ChromaDB for user's watched movies.
 
     Returns (vectors, weights, found_ids, total_requested).
+    Batched in chunks of 999 to respect ChromaDB per-call ID limit.
     """
     if not weighted_ids:
         return [], [], [], 0
 
     col = get_collection()
-    meta_res = col.get(
-        ids=[str(tid) for tid in weighted_ids],
-        include=["embeddings"],
-    )
+    all_ids = [str(tid) for tid in weighted_ids]
 
     vectors: list[list[float]] = []
     weights: list[float] = []
     found: list[int] = []
 
-    for i, tid_str in enumerate(meta_res["ids"]):
-        tid = int(tid_str)
-        user_weight = weighted_ids[tid]
-        emb = meta_res["embeddings"][i]
-        if emb is None:
-            continue
-        emb_arr = emb.tolist() if hasattr(emb, "tolist") else emb
-        vectors.append(emb_arr)
-        weights.append(user_weight)
-        found.append(tid)
+    for i in range(0, len(all_ids), 999):
+        batch_ids = all_ids[i:i + 999]
+        meta_res = col.get(ids=batch_ids, include=["embeddings"])
+        for j, tid_str in enumerate(meta_res["ids"]):
+            tid = int(tid_str)
+            user_weight = weighted_ids[tid]
+            emb = meta_res["embeddings"][j]
+            if emb is None:
+                continue
+            emb_arr = emb.tolist() if hasattr(emb, "tolist") else emb
+            vectors.append(emb_arr)
+            weights.append(user_weight)
+            found.append(tid)
 
     return vectors, weights, found, len(weighted_ids)
 
@@ -567,8 +561,10 @@ def taste_similarity(
     and inflate similarity), for each movie in A finds its nearest neighbour
     in B (by cosine similarity) and averages those scores.
     """
-    found_a = [tid for tid in a_weighted if _get_embedding(tid) is not None]
-    found_b = [tid for tid in b_weighted if _get_embedding(tid) is not None]
+    embs_a = _fetch_embeddings(list(a_weighted.keys()))
+    embs_b = _fetch_embeddings(list(b_weighted.keys()))
+    found_a = list(embs_a.keys())
+    found_b = list(embs_b.keys())
 
     if not found_a or not found_b:
         return {
@@ -580,8 +576,6 @@ def taste_similarity(
             "user_b_total": len(b_weighted),
         }
 
-    embs_a = _fetch_embeddings(found_a)
-    embs_b = _fetch_embeddings(found_b)
     list_a = list(embs_a.values())
     list_b = list(embs_b.values())
 
@@ -627,12 +621,13 @@ def _recommend_pipeline(
     randomize: bool = False,
     query_text: str | None = None,
     query_weight: float = 0.0,
+    feature_rerank: bool = True,
 ) -> list[dict[str, Any]]:
     """Unified recommendation pipeline: profile-based, text-based, or hybrid.
 
     Handles loading user histories, sigma calibration, multi-seed ChromaDB
     discovery, kernel regression scoring, geometric mean consensus, optional
-    query blending, reranking, and MMR diversification.
+    query blending, feature reranking, and MMR diversification.
     """
     _timer_start("_recommend_pipeline total")
 
@@ -758,7 +753,7 @@ def _recommend_pipeline(
             if cand_emb is None:
                 continue
             cand_arr = cand_emb.tolist() if hasattr(cand_emb, "tolist") else cand_emb
-            vote_avg, vote_cnt, mc_bonus = _best_vote_data(meta)
+            vote_avg, vote_cnt, mc_bonus = _tmdb_vote_data(meta)
             if vote_cnt < min_vote_count:
                 continue
             if not _matches_genre_filter(meta.get("genres", ""), genre_filter):
@@ -807,6 +802,8 @@ def _recommend_pipeline(
             "title": meta.get("title", "Unknown"),
             "genres": meta.get("genres", ""),
             "year": meta.get("year", 0),
+            "director": meta.get("director", ""),
+            "cast": meta.get("cast", ""),
             "vote_average": vote_avg,
             "vote_count": vote_cnt,
             "metacritic_bonus": mc_bonus,
@@ -821,10 +818,89 @@ def _recommend_pipeline(
     _timer_start("  rerank + MMR")
     reranked = _rerank_candidates(candidates, alpha=0.8)
     _timer_stop()
+
+    if feature_rerank and user_histories:
+        _timer_start("  feature rerank")
+        reranked = _feature_rerank(reranked, user_weighted_list)
+        _timer_stop()
+
     _timer_stop()
     if diversity > 0.0:
         return _mmr_diversify(reranked, n, lam=1.0 - diversity)
     return reranked[:n]
+
+
+def _feature_rerank(
+    candidates: list[dict[str, Any]],
+    user_weighted_list: list[dict[int, float]],
+) -> list[dict[str, Any]]:
+    """Apply a small reranking bonus for shared director, decade, or cast.
+
+    For each user, collects their favourite directors, decades, and actors
+    from watched movies. For each candidate, computes a composite bonus
+    (capped at 10%) and multiplies `rerank_score` accordingly.
+
+    Actor overlap uses Jaccard similarity to avoid penalising movies
+    with small casts.
+    """
+    if not candidates or not user_weighted_list:
+        return candidates
+
+    col = get_collection()
+
+    fav_directors: set[str] = set()
+    fav_decades: set[int] = set()
+    fav_actors: dict[str, float] = {}
+
+    for wdict in user_weighted_list:
+        user_ids = [str(tid) for tid in wdict]
+        for i in range(0, len(user_ids), 999):
+            batch = user_ids[i : i + 999]
+            res = col.get(ids=batch, include=["metadatas"])
+            for j in range(len(res["ids"])):
+                meta = res["metadatas"][j]
+                director = (meta.get("director") or "").lower().strip()
+                if director:
+                    fav_directors.add(director)
+                year = meta.get("year") or 0
+                if year:
+                    fav_decades.add(year - (year % 10))
+                cast_str = meta.get("cast") or ""
+                for actor in cast_str.split(","):
+                    actor = actor.strip().lower()
+                    if actor:
+                        fav_actors[actor] = fav_actors.get(actor, 0) + 1
+
+    for c in candidates:
+        meta_director = (c.get("director") or "").lower().strip()
+        meta_year = c.get("year") or 0
+        meta_decade = meta_year - (meta_year % 10) if meta_year else None
+
+        bonus = 0.0
+
+        if meta_director and meta_director in fav_directors:
+            bonus += 0.10
+
+        if meta_decade is not None and meta_decade in fav_decades:
+            bonus += 0.05
+
+        genres_str = c.get("genres", "")
+        # Cast is not in candidate metadata from ChromaDB query by default,
+        # so we check if it's present. The pipeline would need to include it.
+        cast_str = c.get("cast", "")
+        if cast_str and fav_actors:
+            cand_actors = set(a.strip().lower() for a in cast_str.split(",") if a.strip())
+            if cand_actors:
+                intersection = len(cand_actors & set(fav_actors.keys()))
+                union = len(cand_actors | set(fav_actors.keys()))
+                jaccard = intersection / union if union > 0 else 0.0
+                bonus += 0.05 * jaccard
+
+        capped = min(bonus, 0.10)
+        c["rerank_score"] = round(c["rerank_score"] * (1.0 + capped), 4)
+
+    candidates.sort(key=lambda x: x["rerank_score"], reverse=True)
+    return candidates
 
 
 def recommend_for_group(
@@ -839,6 +915,7 @@ def recommend_for_group(
     max_year: int | None = None,
     min_rating: float | None = 6.5,
     randomize: bool = False,
+    feature_rerank: bool = True,
 ) -> list[dict[str, Any]]:
     """Recommend movies for a group via kernel regression + geometric mean."""
     return _recommend_pipeline(
@@ -846,6 +923,7 @@ def recommend_for_group(
         sigma=sigma, max_distance=max_distance, diversity=diversity,
         genre_filter=genre_filter, min_year=min_year, max_year=max_year,
         min_rating=min_rating, randomize=randomize,
+        feature_rerank=feature_rerank,
     )
 
 
@@ -865,12 +943,8 @@ def _matches_year_filter(year: int, min_year: int | None, max_year: int | None) 
     return True
 
 
-def _best_vote_data(meta: dict) -> tuple[float, int, float]:
-    """Return (avg, count, metacritic_bonus) using TMDB data only.
-
-    Uses TMDB vote_average and vote_count (not IMDb) for consistent filtering
-    and popularity scoring.
-    """
+def _tmdb_vote_data(meta: dict) -> tuple[float, int, float]:
+    """Return (avg, count, metacritic_bonus) using TMDB data only."""
     avg = meta.get("vote_average", 0)
     cnt = meta.get("vote_count", 0)
 
@@ -937,6 +1011,7 @@ def recommend_hybrid(
     max_year: int | None = None,
     min_rating: float | None = 6.5,
     randomize: bool = False,
+    feature_rerank: bool = True,
 ) -> list[dict[str, Any]]:
     """Profile-based + free-text query combined, with kernel regression + geometric mean.
 
@@ -949,6 +1024,7 @@ def recommend_hybrid(
         genre_filter=genre_filter, min_year=min_year, max_year=max_year,
         min_rating=min_rating, randomize=randomize,
         query_text=query_text, query_weight=query_weight,
+        feature_rerank=feature_rerank,
     )
 
 
@@ -988,7 +1064,7 @@ def recommend_from_query(
         cand_emb = results["embeddings"][0][i]
         cand_arr = cand_emb.tolist() if hasattr(cand_emb, "tolist") else cand_emb
 
-        vote_avg, vote_cnt, mc_bonus = _best_vote_data(meta)
+        vote_avg, vote_cnt, mc_bonus = _tmdb_vote_data(meta)
         if vote_cnt < min_vote_count:
             continue
         if not _matches_genre_filter(meta.get("genres", ""), genre_filter):
@@ -1005,6 +1081,8 @@ def recommend_from_query(
             "title": meta.get("title", "Unknown"),
             "genres": meta.get("genres", ""),
             "year": meta.get("year", 0),
+            "director": meta.get("director", ""),
+            "cast": meta.get("cast", ""),
             "vote_average": vote_avg,
             "vote_count": vote_cnt,
             "metacritic_bonus": mc_bonus,
@@ -1042,6 +1120,7 @@ def _mmr_diversify(
 
     selected: list[dict[str, Any]] = []
     remaining = list(candidates)
+    sel_embs: list[np.ndarray] = []
 
     while len(selected) < n and remaining:
         best_idx = 0
@@ -1051,17 +1130,159 @@ def _mmr_diversify(
             if not selected:
                 mmr = relevance
             else:
-                max_sim = max(
-                    cosine_similarity(
-                        cand.get("_emb", [1.0]),
-                        sel.get("_emb", [0.0]),
-                    )
-                    for sel in selected
-                )
+                cand_np = np.array(cand.get("_emb", [0.0]))
+                max_sim = max(_cosine_similarity_np(cand_np, sel_emb) for sel_emb in sel_embs)
                 mmr = lam * relevance - (1.0 - lam) * max_sim
             if mmr > best_score:
                 best_score = mmr
                 best_idx = i
-        selected.append(remaining.pop(best_idx))
+        chosen = remaining.pop(best_idx)
+        selected.append(chosen)
+        sel_embs.append(np.array(chosen.get("_emb", [0.0])))
 
     return selected
+
+
+def rank_watchlist(
+    export_dir: str,
+    n: int | None = None,
+    min_vote_count: int = 2000,
+    sigma: float | None = 0.3,
+    max_distance: float = -1.0,
+    genre_filter: list[str] | None = None,
+    min_year: int | None = None,
+    max_year: int | None = None,
+    min_rating: float | None = 6.5,
+    auto_sigma: bool = False,
+) -> list[dict[str, Any]]:
+    """Predict ratings for every film in a Letterboxd watchlist using kernel regression on the user's watched history.
+
+    Returns watchlist films ranked by predicted rating (highest first), with metadata for display.
+    """
+    _timer_start("rank_watchlist total")
+
+    from src.profile import parse_export, resolve_tmdb_ids
+
+    profile = parse_export(export_dir)
+    logger.info("Profile: %d watched, %d watchlist", len(profile.watched), len(profile.watchlist))
+
+    _timer_start("  resolve TMDB IDs")
+    profile = resolve_tmdb_ids(profile, resolve_watchlist=True)
+    _timer_stop()
+
+    watched_ids = {f.tmdb_id for f in profile.watched if f.tmdb_id}
+    weighted: dict[int, float] = {}
+    for f in profile.watched:
+        if f.tmdb_id:
+            weighted[f.tmdb_id] = f.rating / 5.0 if f.rating is not None else 0.6
+    logger.info("Watched with TMDB IDs: %d", len(weighted))
+
+    if not weighted:
+        logger.warning("No watched history found.")
+        _timer_stop()
+        return []
+
+    history = _load_user_history(weighted)
+    if not history:
+        logger.warning("No watched films found in ChromaDB.")
+        _timer_stop()
+        return []
+
+    watchlist_ids = [
+        f.tmdb_id for f in profile.watchlist
+        if f.tmdb_id and f.tmdb_id not in watched_ids
+    ]
+    logger.info("Watchlist in ChromaDB (excl. watched): %d", len(watchlist_ids))
+
+    if not watchlist_ids:
+        logger.warning("Watchlist is empty or all films already watched.")
+        _timer_stop()
+        return []
+
+    _timer_start("  fetch watchlist from ChromaDB")
+    col = get_collection()
+    watch_map: dict[str, tuple[dict, list[float] | None]] = {}
+    batch_size = 999
+    for i in range(0, len(watchlist_ids), batch_size):
+        batch = [str(tid) for tid in watchlist_ids[i:i + batch_size]]
+        res = col.get(ids=batch, include=["embeddings", "metadatas"])
+        for j, tid_s in enumerate(res["ids"]):
+            watch_map[tid_s] = (res["metadatas"][j], res["embeddings"][j])
+    _timer_stop()
+
+    _timer_start("  filter candidates")
+    cand_embs: list[list[float]] = []
+    cand_metas: list[tuple[int, dict]] = []
+    not_found = 0
+    for tid in watchlist_ids:
+        tid_s = str(tid)
+        entry = watch_map.get(tid_s)
+        if entry is None:
+            not_found += 1
+            continue
+        meta, emb = entry
+        if emb is None:
+            not_found += 1
+            continue
+
+        vote_avg, vote_cnt, _ = _tmdb_vote_data(meta)
+        if vote_cnt < min_vote_count:
+            continue
+        if not _matches_genre_filter(meta.get("genres", ""), genre_filter):
+            continue
+        if not _matches_year_filter(meta.get("year", 0), min_year, max_year):
+            continue
+        if min_rating is not None and vote_avg < min_rating:
+            continue
+
+        cand_arr = emb.tolist() if hasattr(emb, "tolist") else emb
+        cand_embs.append(cand_arr)
+        cand_metas.append((tid, meta))
+    if not_found:
+        logger.info("  %d watchlist films not in ChromaDB", not_found)
+    _timer_stop()
+
+    if not cand_embs:
+        logger.warning("No watchlist films passed the filters.")
+        _timer_stop()
+        return []
+
+    _timer_start("  sigma calibration")
+    if auto_sigma:
+        sigma = _calibrate_sigma_cv(history, max_distance=max_distance)
+        print(f"  Auto-sigma: {sigma:.3f}", file=sys.stderr, flush=True)
+    _timer_stop()
+
+    _timer_start("  batch predict (%d candidates × %d history)" % (len(cand_embs), len(history)))
+    hist_embs_np = np.array([h[0] for h in history])
+    hist_ratings_np = np.array([h[1] for h in history], dtype=float)
+    cand_np = np.array(cand_embs)
+    preds = _predict_rating_batch(cand_np, hist_embs_np, hist_ratings_np, sigma or 0.3, max_distance)
+    _timer_stop()
+
+    _timer_start("  sort results")
+    results = []
+    for idx, (tid, meta) in enumerate(cand_metas):
+        pred_raw = float(preds[idx])
+        pp = meta.get("poster_path", "")
+        poster_url = f"https://image.tmdb.org/t/p/w200{pp}" if pp else ""
+        results.append({
+            "tmdb_id": tid,
+            "title": meta.get("title", "Unknown"),
+            "genres": meta.get("genres", ""),
+            "year": meta.get("year", 0),
+            "vote_average": meta.get("vote_average", 0),
+            "vote_count": meta.get("vote_count", 0),
+            "predicted_rating": round(pred_raw, 4),
+            "predicted_stars": round(pred_raw * 5, 2),
+            "url": f"https://letterboxd.com/tmdb/{tid}/",
+            "poster": poster_url,
+        })
+
+    results.sort(key=lambda x: x["predicted_rating"], reverse=True)
+    if n is not None:
+        results = results[:n]
+    _timer_stop()
+
+    _timer_stop()
+    return results

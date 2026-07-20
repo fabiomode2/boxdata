@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import requests
+from curl_cffi import requests
 
 from src.collector import _tmdb_get
 from src.config import HEADERS, TMDB_BASE
@@ -50,10 +50,7 @@ _LB_SEM = threading.Semaphore(5)
 def _lb_session() -> requests.Session:
     global _LB_SESSION
     if _LB_SESSION is None:
-        _LB_SESSION = requests.Session()
-        _LB_SESSION.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        })
+        _LB_SESSION = requests.Session(impersonate="safari17_0")
     return _LB_SESSION
 
 
@@ -82,7 +79,8 @@ def _resolve_from_uri(uri: str) -> int | None:
                 return tid
             _SCRAPE_CACHE[cache_key] = -1
             return None
-        except Exception:
+        except Exception as e:
+            logger.debug("URI resolution failed for '%s': %s", uri, e)
             _SCRAPE_CACHE[cache_key] = -1
             return None
 
@@ -108,7 +106,8 @@ def _resolve_via_tmdb(name: str, year: int) -> int | None:
                 return r["id"]
         _SCRAPE_CACHE[cache_key] = results[0]["id"]
         return results[0]["id"]
-    except Exception:
+    except Exception as e:
+        logger.debug("TMDB search failed for '%s' (%d): %s", name, year, e)
         return None
 
 
@@ -121,14 +120,17 @@ def _build_chromadb_index() -> dict[tuple[str, int], int]:
     if _CHROMA_INDEX is not None:
         return _CHROMA_INDEX
     col = get_collection()
-    all_data = col.get(include=["metadatas"])
+    total = col.count()
+    batch_size = 1000
     index: dict[tuple[str, int], int] = {}
-    for i, tid_str in enumerate(all_data["ids"]):
-        meta = all_data["metadatas"][i]
-        title = (meta.get("title") or "").lower().strip()
-        year = meta.get("year") or 0
-        if title and year:
-            index[(title, year)] = int(tid_str)
+    for offset in range(0, total, batch_size):
+        res = col.get(offset=offset, limit=batch_size, include=["metadatas"])
+        for i, tid_str in enumerate(res["ids"]):
+            meta = res["metadatas"][i]
+            title = (meta.get("title") or "").lower().strip()
+            year = meta.get("year") or 0
+            if title and year:
+                index[(title, year)] = int(tid_str)
     _CHROMA_INDEX = index
     return index
 
@@ -233,10 +235,8 @@ def resolve_tmdb_ids(profile: UserProfile, resolve_watchlist: bool = False) -> U
                     tid = future.result()
                     if tid:
                         f.tmdb_id = tid
-                except Exception:
-                    pass
-                done += 1
-                if done % 50 == 0 or done == n_uri:
+                except Exception as e:
+                    logger.debug("URI resolve failed for '%s': %s", f.name, e)
                     logger.info("    resolved %d/%d via URI", done, n_uri)
 
     # Step 2: TMDB search for remaining (parallel)
@@ -253,10 +253,8 @@ def resolve_tmdb_ids(profile: UserProfile, resolve_watchlist: bool = False) -> U
                     tid = future.result()
                     if tid:
                         f.tmdb_id = tid
-                except Exception:
-                    pass
-                done += 1
-                if done % 20 == 0 or done == n_rem:
+                except Exception as e:
+                    logger.debug("TMDB search failed for '%s' (%d): %s", f.name, f.year, e)
                     logger.info("    searched %d/%d via TMDB", done, n_rem)
 
     return profile

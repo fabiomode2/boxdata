@@ -2,8 +2,10 @@ import logging
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import requests
 from datetime import date
+
+from curl_cffi import requests
+from curl_cffi import CurlError
 
 from src.config import TMDB_BASE, HEADERS
 from src.models import Movie
@@ -54,7 +56,7 @@ def _fetch_movie_detail(tmdb_id: int) -> tuple[str | None, list[str], str | None
     url = f"{TMDB_BASE}/movie/{tmdb_id}"
     try:
         data = _tmdb_get(url, {"append_to_response": "credits"})
-    except requests.RequestException:
+    except CurlError:
         return None, [], None
     imdb_id = data.get("imdb_id")
     credits = data.get("credits") or {}
@@ -77,7 +79,8 @@ def _fetch_credits_batch(tmdb_ids: list[int]) -> dict[int, tuple[str | None, lis
             tid = futures[future]
             try:
                 results[tid] = future.result()
-            except Exception:
+            except Exception as e:
+                logger.debug("Credit fetch failed for TMDB %d: %s", tid, e)
                 results[tid] = (None, [], None)
     return results
 
@@ -97,6 +100,7 @@ def fetch_movies_by_year(
     skip_credits: bool = False,
     seen_ids: set[int] | None = None,
     enrich: bool = True,
+    enrich_reviews: bool = True,
 ) -> list[Movie]:
     """Fetch top N movies for a year from TMDB, then batch-fetch credits + optional IMDb enrichment.
 
@@ -107,6 +111,8 @@ def fetch_movies_by_year(
 
     When enrich=True, also fetches IMDb rating/votes, metacritic, interests
     (subgenres), origin countries, and spoken languages via imdbapi.dev.
+    When enrich_reviews=True, fetches top TMDB reviews for each movie
+    (used for LLM-enhanced embeddings).
     """
     _load_genres()
     candidates: list[dict] = []
@@ -184,11 +190,14 @@ def fetch_movies_by_year(
     if enrich and imdb_id_map and not skip_credits:
         _apply_imdb_enrichment(movies, imdb_id_map)
 
+    if enrich_reviews and not skip_credits:
+        _apply_review_enrichment(movies)
+
     return movies
 
 
 def _apply_imdb_enrichment(movies: list[Movie], imdb_id_map: dict[int, str]) -> None:
-    from src.imdb_enricher import extract_enrichment, fetch_enrichment
+    from src.imdbapi_enricher import extract_enrichment, fetch_enrichment
 
     tmdb_to_imdb = {v: k for k, v in imdb_id_map.items()}
     imdb_ids = list(imdb_id_map.values())
@@ -212,3 +221,29 @@ def _apply_imdb_enrichment(movies: list[Movie], imdb_id_map: dict[int, str]) -> 
 
     if found:
         logger.info("  IMDb enrichment: %d/%d movies enriched", found, len(movies))
+
+
+def _apply_review_enrichment(movies: list[Movie]) -> None:
+    """Fetch top reviews from TMDB for each movie in parallel."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from src.review_fetcher import fetch_top_reviews
+
+    logger.info("  Fetching reviews for %d movies...", len(movies))
+
+    movie_map = {m.tmdb_id: m for m in movies}
+    found = 0
+
+    with ThreadPoolExecutor(max_workers=_CREDIT_WORKERS) as pool:
+        futures = {pool.submit(fetch_top_reviews, m.tmdb_id): m.tmdb_id for m in movies}
+        for future in as_completed(futures):
+            tid = futures[future]
+            try:
+                reviews = future.result()
+                if reviews:
+                    movie_map[tid].top_reviews = reviews
+                    found += 1
+            except Exception as e:
+                logger.debug("Review fetch failed for TMDB %d: %s", tid, e)
+
+    if found:
+        logger.info("  Review enrichment: %d/%d movies enriched", found, len(movies))

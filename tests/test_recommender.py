@@ -15,6 +15,7 @@ from src.recommender import (
     cosine_similarity,
     predict_rating,
     _calibrate_sigma_cv,
+    _feature_rerank,
 )
 
 
@@ -323,25 +324,125 @@ def test_matches_genre_filter() -> None:
     assert _matches_genre_filter("Science Fiction", ["science fiction"]) is True
 
 
-def test_best_vote_data_prefers_imdb() -> None:
-    from src.recommender import _best_vote_data
+def test_tmdb_vote_data_uses_tmdb_only() -> None:
+    from src.recommender import _tmdb_vote_data
     meta = {
         "vote_average": 6.0, "vote_count": 100,
         "imdb_rating": 8.0, "imdb_vote_count": 50000,
         "metacritic_score": 80,
     }
-    avg, cnt, mc_bonus = _best_vote_data(meta)
-    assert avg == 8.0  # prefers IMDb
-    assert cnt == 50000
+    avg, cnt, mc_bonus = _tmdb_vote_data(meta)
+    assert avg == 6.0  # uses TMDB, not IMDb
+    assert cnt == 100
     assert mc_bonus > 1.0  # metacritic > 50
 
 
-def test_best_vote_data_fallsback_to_tmdb() -> None:
-    from src.recommender import _best_vote_data
-    meta = {
-        "vote_average": 7.5, "vote_count": 200,
-        "imdb_rating": None, "imdb_vote_count": None,
+def test_tmdb_vote_data_handles_empty_meta() -> None:
+    from src.recommender import _tmdb_vote_data
+    meta: dict = {}
+    avg, cnt, mc_bonus = _tmdb_vote_data(meta)
+    assert avg == 0.0
+    assert cnt == 0
+    assert mc_bonus == 1.0
+
+
+# ── Feature Reranking ──
+
+def test_feature_rerank_director_bonus() -> None:
+    """Director match gives +10% bonus."""
+    from unittest.mock import patch, MagicMock
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["1"],
+        "metadatas": [{"director": "christopher nolan", "year": 2010, "cast": ""}],
     }
-    avg, cnt, _ = _best_vote_data(meta)
-    assert avg == 7.5
-    assert cnt == 200
+
+    candidates = [
+        {"tmdb_id": 100, "director": "christopher nolan", "year": 2014, "cast": "",
+         "genres": "Sci-Fi", "rerank_score": 1.0},
+    ]
+    user_weighted_list = [{1: 0.9}]
+
+    with patch("src.recommender.get_collection", return_value=mock_col):
+        result = _feature_rerank(candidates, user_weighted_list)
+
+    assert result[0]["rerank_score"] == pytest.approx(1.10, abs=0.01)
+
+
+def test_feature_rerank_decade_bonus() -> None:
+    """Decade match gives +5% bonus."""
+    from unittest.mock import patch, MagicMock
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["1"],
+        "metadatas": [{"director": "someone", "year": 2012, "cast": ""}],
+    }
+
+    candidates = [
+        {"tmdb_id": 100, "director": "other", "year": 2015, "cast": "",
+         "genres": "", "rerank_score": 1.0},
+    ]
+    user_weighted_list = [{1: 0.8}]
+
+    with patch("src.recommender.get_collection", return_value=mock_col):
+        result = _feature_rerank(candidates, user_weighted_list)
+
+    assert result[0]["rerank_score"] == pytest.approx(1.05, abs=0.01)
+
+
+def test_feature_rerank_actor_jaccard() -> None:
+    """Actor overlap uses Jaccard similarity, capped contribution."""
+    from unittest.mock import patch, MagicMock
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["1"],
+        "metadatas": [{"director": "x", "year": 1995, "cast": "alice, bob, charlie"}],
+    }
+
+    candidates = [
+        {"tmdb_id": 100, "director": "y", "year": 2015, "cast": "alice, bob, dave",
+         "genres": "", "rerank_score": 1.0},
+    ]
+    user_weighted_list = [{1: 0.7}]
+
+    with patch("src.recommender.get_collection", return_value=mock_col):
+        result = _feature_rerank(candidates, user_weighted_list)
+
+    # Decades: 1990 vs 2010 → no match
+    # Director: x vs y → no match
+    # Jaccard({alice, bob, dave}, {alice, bob, charlie}) = 2/4 = 0.5
+    # Actor bonus = 0.05 * 0.5 = 0.025
+    assert result[0]["rerank_score"] == pytest.approx(1.025, abs=0.01)
+
+
+def test_feature_rerank_cap_10pct() -> None:
+    """Total bonus capped at 10% even when multiple features match."""
+    from unittest.mock import patch, MagicMock
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["1"],
+        "metadatas": [{"director": "nolan", "year": 2010, "cast": "leo, tom"}],
+    }
+
+    candidates = [
+        {"tmdb_id": 100, "director": "nolan", "year": 2014, "cast": "leo, matt",
+         "genres": "", "rerank_score": 1.0},
+    ]
+    user_weighted_list = [{1: 0.9}]
+
+    with patch("src.recommender.get_collection", return_value=mock_col):
+        result = _feature_rerank(candidates, user_weighted_list)
+
+    # director: +0.10, decade: +0.05, actors: +some Jaccard
+    # All combined capped at 0.10
+    assert result[0]["rerank_score"] == pytest.approx(1.10, abs=0.01)
+
+
+def test_feature_rerank_empty_inputs() -> None:
+    """Empty candidates or empty user list returns unchanged."""
+    assert _feature_rerank([], [{1: 0.5}]) == []
+    assert _feature_rerank([{"rerank_score": 1.0}], []) == [{"rerank_score": 1.0}]

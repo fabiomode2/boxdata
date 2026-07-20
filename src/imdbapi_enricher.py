@@ -1,7 +1,8 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import requests
+from curl_cffi import requests
+from curl_cffi import CurlError
 
 from src.config import IMDB_BASE
 
@@ -18,7 +19,7 @@ def _fetch_one(imdb_id: str) -> dict | None:
             logger.warning("IMDb API %d for %s", resp.status_code, imdb_id)
             return None
         return resp.json()
-    except requests.RequestException as e:
+    except CurlError as e:
         logger.warning("IMDb API error for %s: %s", imdb_id, e)
         return None
 
@@ -33,7 +34,7 @@ def _fetch_batch(imdb_ids: list[str]) -> dict[str, dict]:
         data = resp.json()
         titles = data.get("titles", [])
         return {t["id"]: t for t in titles}
-    except requests.RequestException as e:
+    except CurlError as e:
         logger.warning("IMDb batch error: %s", e)
         return {}
 
@@ -63,8 +64,8 @@ def fetch_enrichment(imdb_ids: list[str]) -> dict[str, dict]:
                             data = future.result()
                             if data:
                                 result[iid] = data
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("IMDb individual fetch failed for '%s': %s", iid, e)
             result.update(batch)
 
     return result

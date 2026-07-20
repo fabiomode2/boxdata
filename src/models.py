@@ -88,6 +88,7 @@ class Movie:
             "metacritic_score": self.metacritic_score if self.metacritic_score is not None else 0,
             "interests": ",".join(self.interests),
             "poster_path": self.poster_path or "",
+            "cast": ",".join(self.cast) if self.cast else "",
         }
 
     def to_dict(self) -> dict[str, Any]:
