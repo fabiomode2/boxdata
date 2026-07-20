@@ -84,7 +84,7 @@ def test_evaluate_user_synthetic() -> None:
     mock_total = 20
 
     with patch("src.evaluator._fetch_user_embeddings",
-              return_value=(mock_vectors, mock_weights, mock_found, mock_total)):
+              return_value=(mock_vectors, mock_weights, mock_found, mock_total, [])):
         result = evaluate_user({i: 0.9 for i in range(20)}, n_folds=3)
 
     assert "error" not in result
@@ -104,7 +104,7 @@ def test_evaluate_user_synthetic_leave_one_out() -> None:
     mock_total = 5
 
     with patch("src.evaluator._fetch_user_embeddings",
-              return_value=(mock_vectors, mock_weights, mock_found, mock_total)):
+              return_value=(mock_vectors, mock_weights, mock_found, mock_total, [])):
         result = evaluate_user({i: 0.9 for i in range(5)}, n_folds=5)
 
     assert "error" not in result
@@ -122,7 +122,7 @@ def test_evaluate_user_high_variance() -> None:
     mock_total = 10
 
     with patch("src.evaluator._fetch_user_embeddings",
-              return_value=(mock_vectors, mock_weights, mock_found, mock_total)):
+              return_value=(mock_vectors, mock_weights, mock_found, mock_total, [])):
         result = evaluate_user({i: w for i, w in enumerate(mock_weights)}, n_folds=3)
 
     assert "error" not in result

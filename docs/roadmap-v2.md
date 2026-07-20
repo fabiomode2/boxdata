@@ -21,6 +21,7 @@ Referencia: [`embedding-upgrade-plan.md`](./embedding-upgrade-plan.md) (mejora d
 | `filter` + `llm-text` commands | `src/filter_runner.py`, `src/llm_text_generator.py`, `main.py` | Pipeline previo a la Fase 3 (LLM embeddings) |
 | Feature reranking implementado | `src/recommender.py:_feature_rerank` | Bonus por director/década/actores (Jaccard), cap 10%, flag `--feature-rerank` |
 | TextGenerator abstracto | `src/llm_text_generator.py` | Parámetro `provider` soporta `"ollama"` (local) y `"openai"` (cloud, compatible OpenAI) — swap sin reescribir |
+| Cleanup refactor: split recommender.py (1312→309 lns) | `src/similarity.py`, `src/scraper.py`, `src/pipeline.py`, `src/session.py`, `src/timers.py`, `src/cli.py` | 4 concerns separados, sesión curl compartida, CLI builders extraídos, `_tmdb_get` publicada. Bugfix: metadata loop en `_feature_rerank` procesaba solo último movie por batch |
 
 ---
 

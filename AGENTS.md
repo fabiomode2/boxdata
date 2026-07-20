@@ -111,6 +111,27 @@ misc/                 Experimental files (viewer.html)
 - **CSS selectors over regex** for Letterboxd scraping (BeautifulSoup, `li.griditem`, `[data-tmdb-id]`)
 - **Geometric mean over arithmetic mean** for group consensus: softer than min, harder than avg, rewards genuine agreement
 
+## Agent Skills (OpenCode)
+
+Skills loaded for BoxData development:
+
+| Skill | Source | Area |
+|-------|--------|------|
+| data-pipeline | local | ETL pipeline patterns |
+| web-scraping | local | Letterboxd scraping, curl-cffi, anti-bot |
+| python-design-patterns | local | Architecture, SRP, composition |
+| python-testing-patterns | local | pytest, fixtures, mocking |
+| python-performance-optimization | local | Profiling, batch scoring |
+| react-dev | local | React 18 type-safe components |
+| vite | local | Vite 6 build tool |
+| google-gemini-embeddings | local | Alternative embedding model |
+| cavecrew | local | Compressed subagents for long sessions |
+| fastapi-python | skills.sh (11.4K) | FastAPI API server patterns |
+| machine-learning | skills.sh (1.5K) | ML patterns for kernel regression |
+| frontend-react-best-practices | skills.sh (983) | React best practices |
+| local-llm-ops | skills.sh (289) | Ollama/local LLM operations |
+| umap-learn | skills.sh (225) | UMAP dimensionality reduction |
+
 ## Lessons Learned
 1. ChromaDB cosine distance → `similarity = 1.0 - dist` (not `1/(1+dist)` which is for L2)
 2. Quality factor in primary score penalises niche movies twice — quality belongs in reranking only
@@ -207,3 +228,13 @@ misc/                 Experimental files (viewer.html)
 - UMAP + HDBSCAN embedding space explorer
 - FastAPI web demo
 - 24 unit tests
+
+---
+
+## Temp Plan File Lifecycle
+
+`docs/plan_actual_temp.md` holds current work-in-progress plan for active phase.
+- Created at phase start with full implementation details
+- Deleted when phase completes
+- Results documented concisely in `docs/roadmap-v2.md` (Changelog section)
+- One temp file at a time; outdated plans are cleaned

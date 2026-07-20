@@ -65,7 +65,7 @@ def evaluate_user(
 
     Returns MAE, RMSE, Precision@5, nDCG@5, MRR (mean + std across folds).
     """
-    vectors, weights, found_ids, total = _fetch_user_embeddings(weighted_ids)
+    vectors, weights, found_ids, total, _ = _fetch_user_embeddings(weighted_ids)
 
     if len(vectors) < 3:
         return {

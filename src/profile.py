@@ -4,17 +4,15 @@ import csv
 import logging
 import re
 import time
-import threading
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from curl_cffi import requests
-
-from src.collector import _tmdb_get
+from src.collector import tmdb_get
 from src.config import HEADERS, TMDB_BASE
+from src.session import LB_SEM, get_curl_session
 from src.vector_store import get_collection
 
 logger = logging.getLogger(__name__)
@@ -42,16 +40,7 @@ def _parse_csv(path: Path) -> list[dict[str, str]]:
 
 
 _SCRAPE_CACHE: dict[str, int | None] = {}
-_LB_SESSION: requests.Session | None = None
 _LETTERBOXD_BASE = "https://letterboxd.com"
-_LB_SEM = threading.Semaphore(5)
-
-
-def _lb_session() -> requests.Session:
-    global _LB_SESSION
-    if _LB_SESSION is None:
-        _LB_SESSION = requests.Session(impersonate="safari17_0")
-    return _LB_SESSION
 
 
 def _resolve_from_uri(uri: str) -> int | None:
@@ -65,9 +54,9 @@ def _resolve_from_uri(uri: str) -> int | None:
     cached = _SCRAPE_CACHE.get(cache_key)
     if cached is not None:
         return cached if cached > 0 else None
-    with _LB_SEM:
+    with LB_SEM:
         try:
-            resp = _lb_session().get(f"{_LETTERBOXD_BASE}/film/{slug}/", timeout=15)
+            resp = get_curl_session().get(f"{_LETTERBOXD_BASE}/film/{slug}/", timeout=15)
             if resp.status_code != 200:
                 _SCRAPE_CACHE[cache_key] = -1
                 return None
@@ -92,7 +81,7 @@ def _resolve_via_tmdb(name: str, year: int) -> int | None:
     if cached is not None:
         return cached if cached > 0 else None
     try:
-        data = _tmdb_get(
+        data = tmdb_get(
             f"{TMDB_BASE}/search/movie",
             params={"query": name, "year": year},
         )

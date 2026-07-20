@@ -19,7 +19,7 @@ _TMDB_MIN_INTERVAL = 0.25
 _CREDIT_WORKERS = 10
 
 
-def _tmdb_get(url: str, params: dict | None = None) -> dict:
+def tmdb_get(url: str, params: dict | None = None) -> dict:
     global _TMDB_LAST_CALL
     while True:
         with _TMDB_LOCK:
@@ -40,7 +40,7 @@ def _tmdb_get(url: str, params: dict | None = None) -> dict:
 def _load_genres() -> dict[int, str]:
     if GENRE_CACHE:
         return GENRE_CACHE
-    data = _tmdb_get(f"{TMDB_BASE}/genre/movie/list")
+    data = tmdb_get(f"{TMDB_BASE}/genre/movie/list")
     for g in data.get("genres", []):
         GENRE_CACHE[g["id"]] = g["name"]
     return GENRE_CACHE
@@ -55,7 +55,7 @@ def _fetch_movie_detail(tmdb_id: int) -> tuple[str | None, list[str], str | None
     """Fetch movie detail + credits via `_tmdb_get` (shared rate limiter)."""
     url = f"{TMDB_BASE}/movie/{tmdb_id}"
     try:
-        data = _tmdb_get(url, {"append_to_response": "credits"})
+        data = tmdb_get(url, {"append_to_response": "credits"})
     except CurlError:
         return None, [], None
     imdb_id = data.get("imdb_id")
@@ -122,7 +122,7 @@ def fetch_movies_by_year(
     oversample = max_per_year * 3
 
     while len(candidates) < oversample:
-        data = _tmdb_get(f"{TMDB_BASE}/discover/movie", {
+        data = tmdb_get(f"{TMDB_BASE}/discover/movie", {
             "primary_release_year": year,
             "sort_by": "popularity.desc",
             "page": page,

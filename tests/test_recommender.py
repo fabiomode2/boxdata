@@ -364,7 +364,7 @@ def test_feature_rerank_director_bonus() -> None:
     ]
     user_weighted_list = [{1: 0.9}]
 
-    with patch("src.recommender.get_collection", return_value=mock_col):
+    with patch("src.pipeline.get_collection", return_value=mock_col):
         result = _feature_rerank(candidates, user_weighted_list)
 
     assert result[0]["rerank_score"] == pytest.approx(1.10, abs=0.01)
@@ -386,7 +386,7 @@ def test_feature_rerank_decade_bonus() -> None:
     ]
     user_weighted_list = [{1: 0.8}]
 
-    with patch("src.recommender.get_collection", return_value=mock_col):
+    with patch("src.pipeline.get_collection", return_value=mock_col):
         result = _feature_rerank(candidates, user_weighted_list)
 
     assert result[0]["rerank_score"] == pytest.approx(1.05, abs=0.01)
@@ -408,7 +408,7 @@ def test_feature_rerank_actor_jaccard() -> None:
     ]
     user_weighted_list = [{1: 0.7}]
 
-    with patch("src.recommender.get_collection", return_value=mock_col):
+    with patch("src.pipeline.get_collection", return_value=mock_col):
         result = _feature_rerank(candidates, user_weighted_list)
 
     # Decades: 1990 vs 2010 → no match
@@ -434,7 +434,7 @@ def test_feature_rerank_cap_10pct() -> None:
     ]
     user_weighted_list = [{1: 0.9}]
 
-    with patch("src.recommender.get_collection", return_value=mock_col):
+    with patch("src.pipeline.get_collection", return_value=mock_col):
         result = _feature_rerank(candidates, user_weighted_list)
 
     # director: +0.10, decade: +0.05, actors: +some Jaccard
@@ -446,3 +446,85 @@ def test_feature_rerank_empty_inputs() -> None:
     """Empty candidates or empty user list returns unchanged."""
     assert _feature_rerank([], [{1: 0.5}]) == []
     assert _feature_rerank([{"rerank_score": 1.0}], []) == [{"rerank_score": 1.0}]
+
+
+def test_feature_rerank_partial_metadata() -> None:
+    """Movies with missing director/year/cast should not crash."""
+    from unittest.mock import patch, MagicMock
+
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["1", "2"],
+        "metadatas": [
+            {"director": "", "year": 0, "cast": ""},
+            {"director": "nolan", "year": 2010, "cast": "leo"},
+        ],
+    }
+
+    candidates = [
+        {"tmdb_id": 100, "director": "nolan", "year": 2014, "cast": "leo",
+         "genres": "", "rerank_score": 1.0},
+        {"tmdb_id": 101, "director": "", "year": 0, "cast": "",
+         "genres": "", "rerank_score": 1.0},
+    ]
+    user_weighted_list = [{1: 0.9, 2: 0.8}]
+
+    with patch("src.pipeline.get_collection", return_value=mock_col):
+        result = _feature_rerank(candidates, user_weighted_list)
+
+    # First candidate: director match (+10%) + decade match (+5%) + actor match → capped at 1.10
+    assert result[0]["rerank_score"] == pytest.approx(1.10, abs=0.01)
+    # Second candidate: no features match → no bonus
+    assert result[1]["rerank_score"] == pytest.approx(1.00, abs=0.01)
+
+
+def test_feature_rerank_multi_user() -> None:
+    """Multiple users contribute to favorite directors/actors."""
+    from unittest.mock import patch, MagicMock
+
+    all_data = {
+        "1": {"director": "nolan", "year": 2010, "cast": "leo, tom"},
+        "2": {"director": "fincher", "year": 2000, "cast": "brad, edward"},
+    }
+
+    def mock_get(ids=None, **kwargs):
+        matched_ids = [i for i in ids if i in all_data]
+        return {
+            "ids": matched_ids,
+            "metadatas": [all_data[i] for i in matched_ids],
+        }
+
+    mock_col = MagicMock()
+    mock_col.get.side_effect = mock_get
+
+    candidates = [
+        {"tmdb_id": 100, "director": "nolan", "year": 2014, "cast": "leo, jason",
+         "genres": "", "rerank_score": 1.0},
+    ]
+    user_weighted_list = [{1: 0.9}, {2: 0.8}]
+
+    with patch("src.pipeline.get_collection", return_value=mock_col):
+        result = _feature_rerank(candidates, user_weighted_list)
+
+    # Director nolan matches user 1 → +10%
+    # Decade 2010s matches user 1 → +5%
+    # Jaccard({leo, jason}, {leo, tom, brad, edward}) = 1/5 = 0.2 → 0.05*0.2 = +0.01
+    # Total = 0.10 + 0.05 + 0.01 = 0.16 → capped at 0.10
+    assert result[0]["rerank_score"] == pytest.approx(1.10, abs=0.01)
+
+
+def test_feature_rerank_with_cache() -> None:
+    """user_meta_cache path skips ChromaDB query entirely."""
+    candidates = [
+        {"tmdb_id": 100, "director": "nolan", "year": 2014, "cast": "leo",
+         "genres": "", "rerank_score": 1.0},
+    ]
+    user_weighted_list = [{1: 0.9}]
+    user_meta_cache = {
+        1: {"director": "nolan", "year": 2010, "cast": "leo, tom"},
+    }
+
+    result = _feature_rerank(candidates, user_weighted_list, user_meta_cache)
+
+    # Director + decade + actor Jaccard → capped at 1.10
+    assert result[0]["rerank_score"] == pytest.approx(1.10, abs=0.01)
