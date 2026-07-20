@@ -201,6 +201,7 @@ export default function App() {
   const [refresh, setRefresh] = useState(false)
   const [genre, setGenre] = useState('')
   const [loading, setLoading] = useState(false)
+  const [scraping, setScraping] = useState(null)
   const [error, setError] = useState(null)
   const [recs, setRecs] = useState(null)
   const [isRefetch, setIsRefetch] = useState(false)
@@ -248,8 +249,11 @@ export default function App() {
     }
 
     try {
-      const data = await fetchRecommendations(body)
+      const data = await fetchRecommendations(body, (progress) => {
+        setScraping(progress)
+      })
       setRecs(data)
+      setScraping(null)
       const len = data.length
       const idx = Array.from({ length: len }, (_, i) => i)
       for (let i = len - 1; i > 0; i--) {
@@ -261,6 +265,7 @@ export default function App() {
       setError(err.message)
     } finally {
       setLoading(false)
+      setScraping(null)
     }
   }
 
@@ -396,7 +401,7 @@ export default function App() {
                       {loading ? (
                         <span className="btn-loading">
                           <span className="spinner" />
-                          {t.finding}
+                          {scraping?.user ? `${scraping.user}…` : t.finding}
                         </span>
                       ) : (
                         <>
@@ -413,7 +418,18 @@ export default function App() {
 
             </div>
 
-            {error && !loading && <div className="error">{error}</div>}
+            {loading && scraping && (
+              <div className="scraping-progress">
+                {scraping.phase === 'pages' && `${scraping.user}: scraping pages…`}
+                {scraping.phase === 'resolving' && `${scraping.user}: resolving ${scraping.resolved || 0}/${scraping.total || '?'} films…`}
+                {scraping.phase === 'watchlist' && `${scraping.user}: scraping watchlist…`}
+                {scraping.phase === 'resolving_watchlist' && `${scraping.user}: resolving watchlist…`}
+                {scraping.phase === 'taste_vector' && `${scraping.user}: analyzing taste…`}
+                {scraping.phase === 'recommending' && 'Generating recommendations…'}
+              </div>
+            )}
+
+          {error && !loading && <div className="error">{error}</div>}
 
             {recs && recs.length === 0 && !loading && !error && (
               <div className="empty">

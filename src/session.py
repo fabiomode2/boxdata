@@ -4,7 +4,7 @@ from curl_cffi import requests
 
 LETTERBOXD_BASE = "https://letterboxd.com"
 _REQUEST_DELAY = 1.0
-LB_SEM = threading.Semaphore(5)
+LB_SEM = threading.Semaphore(10)
 
 _session: requests.Session | None = None
 

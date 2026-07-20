@@ -2,23 +2,50 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from curl_cffi import CurlError
 
-from src.session import LB_SEM, LETTERBOXD_BASE, _REQUEST_DELAY, get_curl_session
+from src.session import LB_SEM, LETTERBOXD_BASE, get_curl_session
 from src.timers import _timer_start, _timer_stop
 
 logger = logging.getLogger(__name__)
 
 _MAX_PAGES = 10
+_PAGE_WORKERS = 5
+_SLUG_WORKERS = 15
 
 _CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 _CACHE_TTL = 86400
+
+_SLUG_CACHE_PATH = _CACHE_DIR / "_slug_cache.json"
+_slug_cache: dict[str, int] | None = None
+
+
+def _load_slug_cache() -> dict[str, int]:
+    global _slug_cache
+    if _slug_cache is not None:
+        return _slug_cache
+    if _SLUG_CACHE_PATH.exists():
+        raw = json.loads(_SLUG_CACHE_PATH.read_text())
+        _slug_cache = {k: v for k, v in raw.items() if v is not None}
+    else:
+        _slug_cache = {}
+    return _slug_cache
+
+
+def _save_slug_cache() -> None:
+    if _slug_cache is None:
+        return
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _SLUG_CACHE_PATH.write_text(json.dumps(_slug_cache, indent=2))
+    os.chmod(_SLUG_CACHE_PATH, 0o600)
 
 
 def _cache_path(username: str) -> Path:
@@ -48,7 +75,8 @@ def _save_cache(username: str, data: dict[int, float]) -> None:
 
 
 def fetch_letterboxd_watchlist(
-    username: str, max_films: int = 200, no_cache: bool = False
+    username: str, max_films: int = 200, no_cache: bool = False,
+    progress: dict | None = None,
 ) -> dict[int, float]:
     _timer_start(f"fetch_letterboxd_watchlist({username})")
     cache_path = _CACHE_DIR / f"{username}_watchlist.json"
@@ -59,51 +87,82 @@ def fetch_letterboxd_watchlist(
             _timer_stop()
             return {int(k): v for k, v in raw.items()}
 
-    scraper = get_curl_session()
-    slug_set: set[str] = set()
     print(f"[BOXSCRAPE] Starting watchlist scrape for {username}", file=sys.stderr, flush=True)
+    scraper = get_curl_session()
 
-    _timer_start("  scrape watchlist pages")
-    for page in range(1, _MAX_PAGES + 1):
-        if len(slug_set) >= max_films:
-            break
+    _timer_start("  scrape watchlist pages (parallel)")
+    slug_set: set[str] = set()
+    page_stop = threading.Event()
+
+    def _fetch_page(page: int) -> list[str]:
+        if page_stop.is_set():
+            return []
         url = f"{LETTERBOXD_BASE}/{username}/watchlist/page/{page}/"
         print(f"[BOXSCRAPE] GET {url}", file=sys.stderr, flush=True)
         resp = scraper.get(url, timeout=20)
         if resp.status_code != 200:
-            break
-        page_entries = _extract_film_page_entries(resp.text)
-        if not page_entries:
-            break
-        for slug, _ in page_entries:
-            if len(slug_set) >= max_films:
-                break
-            slug_set.add(slug)
-        time.sleep(_REQUEST_DELAY)
+            return []
+        entries = _extract_film_page_entries(resp.text)
+        if not entries:
+            page_stop.set()
+            return []
+        time.sleep(0.3)
+        return [slug for slug, _ in entries]
+
+    with ThreadPoolExecutor(max_workers=_PAGE_WORKERS) as pool:
+        fut = {pool.submit(_fetch_page, p): p for p in range(1, _MAX_PAGES + 1)}
+        for f in as_completed(fut):
+            try:
+                for slug in f.result():
+                    if len(slug_set) >= max_films:
+                        break
+                    slug_set.add(slug)
+            except Exception as e:
+                logger.debug("Watchlist page fetch failed: %s", e)
+
+    for f in fut:
+        f.cancel()
     _timer_stop()
+
+    if not slug_set:
+        _timer_stop()
+        return {}
+
+    if progress is not None:
+        progress.update(phase="resolving_watchlist", total=len(slug_set), resolved=0)
 
     _timer_start("  resolve slugs -> TMDB")
     weighted: dict[int, float] = {}
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        fut = {pool.submit(_resolve_slug_parallel, slug): slug for slug in slug_set}
+    stop_event = threading.Event()
+    with ThreadPoolExecutor(max_workers=_SLUG_WORKERS) as pool:
+        fut = {pool.submit(_resolve_slug_parallel, slug, stop_event): slug for slug in slug_set}
         for future in as_completed(fut):
+            if stop_event.is_set():
+                break
             slug = fut[future]
             try:
                 _, tmdb_id = future.result()
                 if tmdb_id:
-                    weighted[tmdb_id] = 0.5  # fixed: 2.5★ = "curious"
+                    weighted[tmdb_id] = 0.5
+                    if progress is not None:
+                        progress["resolved"] = len(weighted)
             except Exception as e:
                 logger.debug("Slug resolution failed for '%s': %s", slug, e)
+
+    for f in fut:
+        f.cancel()
     _timer_stop()
 
-    cache_path.write_text(json.dumps({str(k): v for k, v in weighted.items()}, indent=2))
-    cache_path.chmod(0o600)
+    if weighted:
+        cache_path.write_text(json.dumps({str(k): v for k, v in weighted.items()}, indent=2))
+        cache_path.chmod(0o600)
     _timer_stop()
     return weighted
 
 
 def fetch_letterboxd_watched(
-    username: str, max_films: int = 500, no_cache: bool = False
+    username: str, max_films: int = 500, no_cache: bool = False,
+    progress: dict | None = None,
 ) -> dict[int, float]:
     _timer_start(f"fetch_letterboxd_watched({username})")
     if not no_cache:
@@ -113,36 +172,66 @@ def fetch_letterboxd_watched(
             _timer_stop()
             return cached
 
-    scraper = get_curl_session()
-    slug_ratings: dict[str, float] = {}
     print(f"[BOXSCRAPE] Starting scrape for {username}", file=sys.stderr, flush=True)
+    if progress is not None:
+        progress.update(user=username, phase="pages")
 
-    _timer_start("  scrape pages")
-    for page in range(1, _MAX_PAGES + 1):
-        if len(slug_ratings) >= max_films:
-            break
+    _timer_start("  scrape pages (parallel)")
+    slug_ratings: dict[str, float] = {}
+    scraper = get_curl_session()
+    page_stop = threading.Event()
+
+    def _fetch_page(page: int) -> list[tuple[str, float]]:
+        if page_stop.is_set():
+            return []
         url = f"{LETTERBOXD_BASE}/{username}/films/page/{page}/"
         print(f"[BOXSCRAPE] GET {url}", file=sys.stderr, flush=True)
         resp = scraper.get(url, timeout=20)
         print(f"[BOXSCRAPE] HTTP {resp.status_code} (len={len(resp.text)})", file=sys.stderr, flush=True)
         if resp.status_code != 200:
             print(f"[BOXSCRAPE] BODY={resp.text[:300]}", file=sys.stderr, flush=True)
-            break
-        page_entries = _extract_film_page_entries(resp.text)
-        if not page_entries:
-            break
-        for slug, rating_norm in page_entries:
-            if len(slug_ratings) >= max_films:
-                break
-            slug_ratings[slug] = max(slug_ratings.get(slug, 0), rating_norm)
-        time.sleep(_REQUEST_DELAY)
+            return []
+        entries = _extract_film_page_entries(resp.text)
+        if not entries:
+            page_stop.set()
+            return []
+        time.sleep(0.3)
+        return entries
+
+    with ThreadPoolExecutor(max_workers=_PAGE_WORKERS) as pool:
+        fut = {pool.submit(_fetch_page, p): p for p in range(1, _MAX_PAGES + 1)}
+        for f in as_completed(fut):
+            try:
+                entries = f.result()
+                if not entries:
+                    continue
+                for slug, rating_norm in entries:
+                    if len(slug_ratings) >= max_films:
+                        break
+                    slug_ratings[slug] = max(slug_ratings.get(slug, 0), rating_norm)
+            except Exception as e:
+                logger.debug("Page fetch failed: %s", e)
+
+    for f in fut:
+        f.cancel()
     _timer_stop()
+
+    if not slug_ratings:
+        print(f"[BOXSCRAPE] No films found for {username}", file=sys.stderr, flush=True)
+        _timer_stop()
+        return {}
+
+    if progress is not None:
+        progress.update(phase="resolving", total=len(slug_ratings), resolved=0)
 
     _timer_start("  resolve slugs -> TMDB")
     weighted: dict[int, float] = {}
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        fut = {pool.submit(_resolve_slug_parallel, slug): slug for slug in slug_ratings}
+    slug_stop = threading.Event()
+    with ThreadPoolExecutor(max_workers=_SLUG_WORKERS) as pool:
+        fut = {pool.submit(_resolve_slug_parallel, slug, slug_stop): slug for slug in slug_ratings}
         for future in as_completed(fut):
+            if slug_stop.is_set():
+                break
             slug = fut[future]
             weight = slug_ratings[slug]
             try:
@@ -150,11 +239,17 @@ def fetch_letterboxd_watched(
                 if tmdb_id:
                     existing = weighted.get(tmdb_id, 0)
                     weighted[tmdb_id] = max(existing, weight)
+                    if progress is not None:
+                        progress["resolved"] = len(weighted)
             except Exception as e:
                 logger.debug("Slug resolution failed for '%s': %s", slug, e)
+
+    for f in fut:
+        f.cancel()
     _timer_stop()
 
-    _save_cache(username, weighted)
+    if weighted:
+        _save_cache(username, weighted)
     _timer_stop()
     return weighted
 
@@ -183,20 +278,36 @@ def _extract_film_page_entries(html: str) -> list[tuple[str, float]]:
     return entries
 
 
-def _resolve_slug_parallel(slug: str) -> tuple[str, int | None]:
+def _resolve_slug_parallel(slug: str, stop_event: threading.Event | None = None) -> tuple[str, int | None]:
+    if stop_event and stop_event.is_set():
+        return slug, None
+
+    cache = _load_slug_cache()
+    cached = cache.get(slug)
+    if cached is not None:
+        return slug, cached
+
     with LB_SEM:
+        if stop_event and stop_event.is_set():
+            return slug, None
+
         from bs4 import BeautifulSoup
 
         url = f"{LETTERBOXD_BASE}/film/{slug}/"
         try:
             scraper = get_curl_session()
             resp = scraper.get(url, timeout=20)
+            if stop_event and stop_event.is_set():
+                return slug, None
             if resp.status_code != 200:
                 return slug, None
             soup = BeautifulSoup(resp.text, "html.parser")
             el = soup.select_one('[data-tmdb-id]')
             if el:
-                return slug, int(el["data-tmdb-id"])
+                tid = int(el["data-tmdb-id"])
+                cache[slug] = tid
+                _save_slug_cache()
+                return slug, tid
         except CurlError as e:
             logger.warning("Slug resolution error for '%s': %s", slug, e)
         return slug, None

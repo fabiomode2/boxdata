@@ -560,6 +560,20 @@ button { font-family: inherit; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* SCRAPING PROGRESS */
+.scraping-progress {
+  text-align: center;
+  color: var(--text-2);
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+  animation: scraping-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes scraping-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
 /* ERROR */
 .error {
   display: flex;
