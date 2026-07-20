@@ -1,40 +1,47 @@
 """Generate detailed LLM text descriptions for movies (for richer embeddings)."""
 import json
 import logging
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
-PROMPT_TEMPLATE = """Generate a detailed 300-word description of this movie using the information below.
-Write in natural, flowing English prose — not bullet points. Cover:
-1. Basic info (title, year, director, main cast)
-2. Genre, style, and tone
-3. Plot summary (based on the overview)
-4. Themes and what makes it distinctive
-5. Critical reception and cultural impact
+DEFAULT_OPENAI_API_BASE = "https://opencode.ai/zen/v1/chat/completions"
+DEFAULT_OPENAI_MODEL = "mimo-v2.5-free"
 
-Title: {title}
-Year: {year}
+PROMPT_TEMPLATE = """Write a compact 80-word description of this movie for a recommendation system.
+Focus on factual plot, genre, style, and tone. Be specific — avoid clichés and fluff.
+
+Title: {title} ({year})
 Director: {director}
 Cast: {cast}
 Genres: {genres}
 Overview: {overview}
-Rating: {rating}/10 ({votes} votes)"""
+Rating: {rating}/10 ({votes} votes)
+{reviews}"""
 
 
 def _build_prompt(d: dict) -> str:
-    cast = ", ".join(d.get("cast", [])[:5]) if d.get("cast") else ""
+    cast = ", ".join(d.get("cast", [])[:5]) if d.get("cast") else "Unknown"
+    reviews = d.get("top_reviews", [])
+    reviews_block = "Reviews: " + (" | ".join(reviews[:3])) if reviews else ""
     return PROMPT_TEMPLATE.format(
         title=d.get("title", "Unknown"),
         year=d.get("release_date", "0000")[:4] if d.get("release_date") else "?",
         director=d.get("director", "Unknown"),
-        cast=cast or "Unknown",
+        cast=cast,
         genres=", ".join(d.get("genres", [])),
         overview=d.get("overview", ""),
         rating=d.get("vote_average", "?"),
         votes=d.get("vote_count", 0),
+        reviews=reviews_block,
     )
 
 
@@ -64,7 +71,8 @@ def _generate_with_openai(prompt: str, api_base: str, api_key: str, model: str) 
             json={
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 600,
+                "max_tokens": 8192,
+                "reasoning": {"enabled": False},
             },
             timeout=90,
         )
@@ -86,6 +94,7 @@ def run_llm_text(
     api_key: str | None = None,
     ollama_host: str = "http://localhost:11434",
     delay: float = 0.5,
+    workers: int = 5,
 ) -> dict[str, Any]:
     """Generate LLM text descriptions for movies.
 
@@ -93,8 +102,8 @@ def run_llm_text(
     movie (skipping those that already have `llm_text` for resumability),
     and writes a new JSONL with the enriched data.
 
-    provider="ollama" uses local Ollama.
-    provider="openai" uses any OpenAI-compatible API (requires api_base + api_key).
+    provider="ollama" uses local Ollama (sequential, GPU-bound).
+    provider="openai" uses any OpenAI-compatible API (concurrent via ThreadPoolExecutor).
     """
     in_path = Path(input_file) if input_file else Path("data/movies_filtered.jsonl")
     out_path = Path(output_file) if output_file else Path("data/movies_llm_text.jsonl")
@@ -120,50 +129,99 @@ def run_llm_text(
         logger.info("Nothing to do.")
         return {"input": str(in_path), "output": str(out_path), "total": total, "generated": 0}
 
-    client = None
-    if provider == "ollama":
-        import ollama
-        client = ollama.Client(host=ollama_host)
+    # Defaults for openai provider
+    if provider == "openai":
+        if not api_base:
+            api_base = DEFAULT_OPENAI_API_BASE
+            logger.info("Using default api_base: %s", api_base)
+        if not api_key:
+            api_key = os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+        if not api_key:
+            logger.warning("OPENCODE_API_KEY not set. OpenCode Zen may reject unauthenticated requests.")
 
     generated = 0
     start_time = time.perf_counter()
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as fout:
-        for movie in movies:
-            if movie.get("llm_text"):
-                fout.write(json.dumps(movie, ensure_ascii=False) + "\n")
-                continue
 
-            prompt = _build_prompt(movie)
+    def _gen_one(movie: dict) -> dict | None:
+        prompt = _build_prompt(movie)
+        if provider == "ollama":
+            import ollama
+            client = ollama.Client(host=ollama_host)
+            text = _generate_with_ollama(client, model, prompt)
+        elif provider == "openai":
+            if not api_base:
+                raise ValueError("api_base required for openai provider")
+            text = _generate_with_openai(prompt, api_base, api_key or "", model)
+        else:
             text = None
 
-            if provider == "ollama":
-                text = _generate_with_ollama(client, model, prompt)
-            elif provider == "openai":
-                if not api_base or not api_key:
-                    logger.error("api_base and api_key required for openai provider")
-                    return {"error": "api_base and api_key required", "generated": generated}
-                text = _generate_with_openai(prompt, api_base, api_key, model)
+        if text:
+            movie["llm_text"] = text
+            return movie
+        logger.warning("  Failed to generate for '%s', keeping original", movie.get("title"))
+        return movie
 
-            if text:
-                movie["llm_text"] = text
-                generated += 1
-                if generated % 10 == 0:
-                    elapsed = time.perf_counter() - start_time
-                    rate = generated / elapsed if elapsed > 0 else 0
-                    logger.info(
-                        "  %d/%d generated (%.1f/min)",
-                        generated, len(to_generate), rate * 60,
-                    )
-            else:
-                logger.warning("  Failed to generate for '%s', keeping original", movie.get("title"))
+    if provider == "openai" and workers > 1:
+        # concurrent: write incrementally with thread lock
+        import threading
+        _write_lock = threading.Lock()
+        to_gen_indices = [i for i, m in enumerate(movies) if not m.get("llm_text")]
 
-            fout.write(json.dumps(movie, ensure_ascii=False) + "\n")
+        def _concurrent_gen(idx: int) -> tuple[int, dict]:
+            return idx, _gen_one(movies[idx])
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w") as fout:
+            # pre-write already-done movies
+            for i, m in enumerate(movies):
+                if i not in to_gen_indices:
+                    fout.write(json.dumps(m, ensure_ascii=False) + "\n")
             fout.flush()
 
-            if delay > 0:
-                time.sleep(delay)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                fut_to_idx = {pool.submit(_concurrent_gen, i): i for i in to_gen_indices}
+                done_count = 0
+                for future in as_completed(fut_to_idx):
+                    idx, result = future.result()
+                    movies[idx] = result
+                    done_count += 1
+                    if result.get("llm_text"):
+                        generated += 1
+                    with _write_lock:
+                        fout.write(json.dumps(result, ensure_ascii=False) + "\n")
+                        fout.flush()
+                    if done_count % 10 == 0:
+                        elapsed = time.perf_counter() - start_time
+                        rate = done_count / elapsed if elapsed > 0 else 0
+                        logger.info(
+                            "  %d/%d generated (%.1f/min)",
+                            done_count, len(to_gen_indices), rate * 60,
+                        )
+    else:
+        # sequential (ollama or single-worker openai)
+        with open(out_path, "w") as fout:
+            for movie in movies:
+                if movie.get("llm_text"):
+                    fout.write(json.dumps(movie, ensure_ascii=False) + "\n")
+                    continue
+
+                movie = _gen_one(movie)
+                if movie.get("llm_text"):
+                    generated += 1
+                    if generated % 10 == 0:
+                        elapsed = time.perf_counter() - start_time
+                        rate = generated / elapsed if elapsed > 0 else 0
+                        logger.info(
+                            "  %d/%d generated (%.1f/min)",
+                            generated, len(to_generate), rate * 60,
+                        )
+
+                fout.write(json.dumps(movie, ensure_ascii=False) + "\n")
+                fout.flush()
+
+                if delay > 0:
+                    time.sleep(delay)
 
     elapsed = time.perf_counter() - start_time
     logger.info(

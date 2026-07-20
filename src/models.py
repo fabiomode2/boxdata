@@ -24,8 +24,14 @@ class Movie:
     interests: list[str] = field(default_factory=list)
     origin_countries: list[str] = field(default_factory=list)
     spoken_languages: list[str] = field(default_factory=list)
+    llm_text: str | None = None
 
     def enriched_text(self) -> str:
+        if self.llm_text:
+            return self.llm_text
+        return self._build_enriched_text()
+
+    def _build_enriched_text(self) -> str:
         year = self.release_date.year if self.release_date else ""
         genres = ", ".join(self.genres) if self.genres else ""
         interests = ", ".join(self.interests) if self.interests else ""

@@ -17,6 +17,10 @@ def build_parsers() -> argparse.ArgumentParser:
     embed_p = sub.add_parser("embed", help="Generate embeddings from JSONL → ChromaDB")
     embed_p.add_argument("--input", type=str, default=None,
                          help="Path to JSONL file (default: data/movies.jsonl)")
+    embed_p.add_argument("--overwrite", action="store_true",
+                         help="Re-embed existing movies via upsert")
+    embed_p.add_argument("--db-path", type=str, default=None,
+                         help="Custom ChromaDB directory (default: data/chroma_db)")
     sub.add_parser("count", help="Show movie count in ChromaDB")
     sub.add_parser("clear-db", help="Delete ALL embeddings from ChromaDB")
     sub.add_parser("explore", help="UMAP + HDBSCAN + Plotly visualization of the embedding space")
@@ -48,6 +52,8 @@ def build_parsers() -> argparse.ArgumentParser:
                        help="Path to output JSONL (default: data/movies_llm_text.jsonl)")
     llm_p.add_argument("--delay", type=float, default=0.5,
                        help="Delay between API calls in seconds (default: 0.5)")
+    llm_p.add_argument("--workers", type=int, default=5,
+                       help="Concurrent workers for OpenAI provider (default: 5, unused for ollama)")
 
     analyze_p = sub.add_parser("analyze", help="Analyze your Letterboxd taste profile")
     analyze_p.add_argument("--export", type=str, required=True,
@@ -66,6 +72,8 @@ def build_parsers() -> argparse.ArgumentParser:
                         help="Save results to JSON file")
     eval_p.add_argument("--no-cache", action="store_true",
                         help="Ignore cached scraped profiles")
+    eval_p.add_argument("--db-path", type=str, default=None,
+                        help="Custom ChromaDB directory (default: data/chroma_db)")
 
     rec_p = sub.add_parser("recommend", help="Recommend movies for 1+ users")
     rec_p.add_argument("--query", type=str, metavar="TEXT",
@@ -104,6 +112,8 @@ def build_parsers() -> argparse.ArgumentParser:
                        help="Randomize discovery seeds for varied results")
     rec_p.add_argument("--no-feature-rerank", action="store_true",
                        help="Disable feature reranking (director/decade/cast bonus, on by default)")
+    rec_p.add_argument("--no-watchlist", action="store_true",
+                       help="Disable watchlist boost (on by default)")
 
     rank_p = sub.add_parser("rank-watchlist", help="Rank watchlist by predicted rating")
     rank_p.add_argument("--export", type=str, required=True,

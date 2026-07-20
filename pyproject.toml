@@ -17,6 +17,7 @@ dependencies = [
     "plotly>=5.15",
     "fastapi>=0.104",
     "uvicorn>=0.24",
+    "slowapi>=0.1.9",
 ]
 
 [project.scripts]

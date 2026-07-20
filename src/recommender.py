@@ -9,7 +9,6 @@ import numpy as np
 from src.pipeline import (
     _fetch_user_embeddings,
     _feature_rerank,
-    _load_user_history,
     _matches_genre_filter,
     _matches_year_filter,
     _mmr_diversify,
@@ -44,7 +43,7 @@ __all__ = [
     "cosine_similarity", "_cosine_similarity_np", "predict_rating",
     "_predict_rating_batch", "_calibrate_sigma_cv",
     # pipeline
-    "_fetch_user_embeddings", "_load_user_history", "_recommend_pipeline",
+    "_fetch_user_embeddings", "_recommend_pipeline",
     "_feature_rerank", "_rerank_candidates", "_mmr_diversify",
     "recommend_from_query", "rank_watchlist",
     "_tmdb_vote_data", "_matches_genre_filter", "_matches_year_filter",

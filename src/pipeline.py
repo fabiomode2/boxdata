@@ -6,7 +6,6 @@ import math
 import sys
 import time
 from pathlib import Path
-from statistics import mean
 from typing import Any
 
 import numpy as np
@@ -30,11 +29,12 @@ def _sigma_cache_key(wdict: dict[int, float]) -> frozenset:
 
 def _fetch_user_embeddings(
     weighted_ids: dict[int, float],
+    db_path: str | None = None,
 ) -> tuple[list[list[float]], list[float], list[int], int, list[dict]]:
     if not weighted_ids:
         return [], [], [], 0, []
 
-    col = get_collection()
+    col = get_collection(db_path=db_path)
     all_ids = [str(tid) for tid in weighted_ids]
 
     vectors: list[list[float]] = []

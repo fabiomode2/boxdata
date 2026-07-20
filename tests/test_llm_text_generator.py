@@ -73,6 +73,38 @@ def test_build_prompt_no_release_date() -> None:
     assert "?" in prompt  # year fallback
 
 
+def test_build_prompt_includes_reviews() -> None:
+    movie = {
+        "title": "Review Film",
+        "release_date": "2022-01-01",
+        "director": "Director",
+        "genres": ["Drama"],
+        "overview": "A reviewed film.",
+        "vote_average": 7.0,
+        "vote_count": 500,
+        "top_reviews": ["Amazing!", "Great acting", "Must watch"],
+    }
+    prompt = _build_prompt(movie)
+    assert "Amazing!" in prompt
+    assert "Great acting" in prompt
+    assert "Must watch" in prompt
+
+
+def test_build_prompt_reviews_fallback() -> None:
+    movie = {
+        "title": "No Reviews",
+        "release_date": "2022-01-01",
+        "director": "Director",
+        "genres": [],
+        "overview": "No reviews here.",
+        "vote_average": 6.0,
+        "vote_count": 100,
+    }
+    prompt = _build_prompt(movie)
+    assert "Reviews:" not in prompt
+    assert "compact 80-word" in prompt
+
+
 def test_build_prompt_cast_truncated_to_five() -> None:
     movie = {
         "title": "Ensemble",
@@ -85,5 +117,7 @@ def test_build_prompt_cast_truncated_to_five() -> None:
         "vote_count": 1000,
     }
     prompt = _build_prompt(movie)
-    assert "A, B, C, D, E" in prompt
-    assert "F" not in prompt  # only top 5
+    assert "Cast: A, B, C, D, E" in prompt
+    # 6th actor not in the Cast line
+    cast_line = [l for l in prompt.split("\n") if l.startswith("Cast:")]
+    assert cast_line and "F" not in cast_line[0]

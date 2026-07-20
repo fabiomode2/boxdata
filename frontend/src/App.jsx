@@ -190,15 +190,15 @@ export default function App() {
 
   const [users, setUsers] = useState([])
   const [userInput, setUserInput] = useState('')
-  const [query, setQuery] = useState('')
   const [n, setN] = useState(12)
   const [minRating, setMinRating] = useState(6.5)
+  const [minVoteCount, setMinVoteCount] = useState(2000)
   const [minYear, setMinYear] = useState('')
   const [maxYear, setMaxYear] = useState('')
   const [diversity, setDiversity] = useState(0.3)
-  const [randomize, setRandomize] = useState(false)
+  const [randomize, setRandomize] = useState(true)
+  const [includeWatchlist, setIncludeWatchlist] = useState(true)
   const [refresh, setRefresh] = useState(false)
-  const [queryWeight, setQueryWeight] = useState(0.3)
   const [genre, setGenre] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -237,13 +237,13 @@ export default function App() {
       users: users.map(u => u.name),
       n,
       diversity,
+      min_vote_count: minVoteCount,
       genre: genre.split(',').map(g => g.trim()).filter(Boolean),
-      query: query.trim() || null,
-      query_weight: queryWeight,
       min_year: minYear ? Math.max(YEAR_MIN, Math.min(YEAR_MAX, parseInt(minYear))) : null,
       max_year: maxYear ? Math.max(YEAR_MIN, Math.min(YEAR_MAX, parseInt(maxYear))) : null,
       min_rating: minRating,
       randomize,
+      include_watchlist: includeWatchlist,
       refresh,
     }
 
@@ -264,7 +264,6 @@ export default function App() {
     }
   }
 
-  const hasQuery = query.trim().length > 0
   const hasResults = recs !== null && !error
 
   return (
@@ -278,6 +277,7 @@ export default function App() {
             <div className="sidebar-body">
               <RangeSlider label={t.results} value={n} onChange={setN} min={1} max={50} step={1} unit="" />
               <RangeSlider label={t.minRating} value={minRating} onChange={setMinRating} min={0} max={10} step={0.5} unit="" />
+              <RangeSlider label="Min votes" value={minVoteCount} onChange={setMinVoteCount} min={500} max={3000} step={250} unit="" />
 
               <div className="filter-group">
                 <div className="filter-header">
@@ -318,23 +318,6 @@ export default function App() {
 
               <div className="filter-group">
                 <div className="filter-header">
-                  <label>{t.textQuery}</label>
-                </div>
-                <input
-                  type="text"
-                  value={query}
-                  onChange={e => setQuery(e.target.value)}
-                  placeholder={t.queryPlaceholder}
-                  className="filter-input"
-                />
-              </div>
-
-              {hasQuery && (
-                <RangeSlider label={t.queryWeight} value={queryWeight} onChange={setQueryWeight} min={0} max={1} step={0.1} unit="" />
-              )}
-
-              <div className="filter-group">
-                <div className="filter-header">
                   <label>{t.genres}</label>
                 </div>
                 <input
@@ -349,6 +332,10 @@ export default function App() {
               <label className="filter-checkbox">
                 <input type="checkbox" checked={randomize} onChange={e => setRandomize(e.target.checked)} />
                 <span>{t.randomize}</span>
+              </label>
+              <label className="filter-checkbox">
+                <input type="checkbox" checked={includeWatchlist} onChange={e => setIncludeWatchlist(e.target.checked)} />
+                <span>{t.includeWatchlist}</span>
               </label>
 
               <label className="filter-checkbox filter-checkbox--warn">

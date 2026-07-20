@@ -15,6 +15,10 @@ import json
 import logging
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from src.cli import build_parsers
 from src.recommender import rank_watchlist
 from src.vector_store import count_movies
@@ -104,7 +108,7 @@ def main() -> None:
         run_collect(args.start, args.end, args.max_per_year, args.test, args.skip_credits, args.skip_imdb, args.skip_reviews)
     elif args.command == "embed":
         from src.embed_runner import run_embed
-        run_embed(input_file=args.input)
+        run_embed(input_file=args.input, overwrite=args.overwrite, db_path=args.db_path)
     elif args.command == "count":
         logger.info("Movies in ChromaDB: %s", count_movies())
     elif args.command == "clear-db":
@@ -147,6 +151,7 @@ def main() -> None:
             api_key=api_key,
             ollama_host=args.ollama_host,
             delay=args.delay,
+            workers=args.workers,
         )
         if "error" not in stats:
             print(f"\nGenerated: {stats['generated']}/{stats['total']} movies "
@@ -172,10 +177,19 @@ def _run_recommend(args: argparse.Namespace) -> None:
             if found_ids:
                 user_weighted.append(weighted)
     elif args.user:
+        from src.scraper import fetch_letterboxd_watchlist
         for username in args.user:
             logger.info("Scraping Letterboxd: %s...", username)
             weighted = fetch_letterboxd_watched(username, no_cache=args.no_cache)
-            logger.info("  Found %d films. Checking embeddings...", len(weighted))
+            wl_count = 0
+            if not args.no_watchlist:
+                watchlist = fetch_letterboxd_watchlist(username, no_cache=args.no_cache)
+                wl_count = len(watchlist)
+                for tid, rating in watchlist.items():
+                    if tid not in weighted:
+                        weighted[tid] = rating
+            logger.info("  %d watched + %d watchlist = %d total", len(weighted) - wl_count, wl_count, len(weighted))
+            logger.info("  Checking embeddings...")
             vec, found_ids, total = get_taste_vector(weighted)
             logger.info("  → %d/%d in ChromaDB", len(found_ids), total)
             if found_ids:
@@ -323,6 +337,7 @@ def _run_evaluate(args: argparse.Namespace) -> None:
     logger.info("Evaluating %d user(s) with %d-fold CV...", len(user_weighted), args.k)
     results = evaluate_users(
         user_weighted, usernames=usernames, n_folds=args.k, sigma=args.sigma,
+        db_path=args.db_path,
     )
 
     _print_evaluation_results(results)

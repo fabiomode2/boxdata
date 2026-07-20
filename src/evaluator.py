@@ -57,6 +57,7 @@ def evaluate_user(
     max_distance: float = -1.0,
     random_seed: int = 42,
     embedding_file: str | None = None,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """k-fold CV evaluation of rating prediction for one user.
 
@@ -64,8 +65,9 @@ def evaluate_user(
     Nadaraya-Watson kernel regression on training fold.
 
     Returns MAE, RMSE, Precision@5, nDCG@5, MRR (mean + std across folds).
+    db_path sets a custom ChromaDB directory (e.g. for dev DB comparison).
     """
-    vectors, weights, found_ids, total, _ = _fetch_user_embeddings(weighted_ids)
+    vectors, weights, found_ids, total, _ = _fetch_user_embeddings(weighted_ids, db_path=db_path)
 
     if len(vectors) < 3:
         return {
@@ -127,6 +129,7 @@ def evaluate_users(
     max_distance: float = -1.0,
     random_seed: int = 42,
     embedding_file: str | None = None,
+    db_path: str | None = None,
 ) -> list[dict[str, Any]]:
     """Evaluate rating prediction for multiple users."""
     results: list[dict[str, Any]] = []
@@ -135,7 +138,7 @@ def evaluate_users(
         logger.info("Evaluating user '%s' (%d movies)...", label, len(wdict))
         result = evaluate_user(
             wdict, n_folds=n_folds, sigma=sigma, max_distance=max_distance,
-            random_seed=random_seed, embedding_file=embedding_file,
+            random_seed=random_seed, embedding_file=embedding_file, db_path=db_path,
         )
         result["user"] = label
         results.append(result)

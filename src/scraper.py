@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -44,6 +45,61 @@ def _save_cache(username: str, data: dict[int, float]) -> None:
     path = _cache_path(username)
     path.write_text(json.dumps(data, indent=2))
     path.chmod(0o600)
+
+
+def fetch_letterboxd_watchlist(
+    username: str, max_films: int = 200, no_cache: bool = False
+) -> dict[int, float]:
+    _timer_start(f"fetch_letterboxd_watchlist({username})")
+    cache_path = _CACHE_DIR / f"{username}_watchlist.json"
+    if not no_cache and cache_path.exists():
+        raw = json.loads(cache_path.read_text())
+        if raw:
+            print(f"[BOXSCRAPE] Cache hit: {len(raw)} films in watchlist for {username}", file=sys.stderr, flush=True)
+            _timer_stop()
+            return {int(k): v for k, v in raw.items()}
+
+    scraper = get_curl_session()
+    slug_set: set[str] = set()
+    print(f"[BOXSCRAPE] Starting watchlist scrape for {username}", file=sys.stderr, flush=True)
+
+    _timer_start("  scrape watchlist pages")
+    for page in range(1, _MAX_PAGES + 1):
+        if len(slug_set) >= max_films:
+            break
+        url = f"{LETTERBOXD_BASE}/{username}/watchlist/page/{page}/"
+        print(f"[BOXSCRAPE] GET {url}", file=sys.stderr, flush=True)
+        resp = scraper.get(url, timeout=20)
+        if resp.status_code != 200:
+            break
+        page_entries = _extract_film_page_entries(resp.text)
+        if not page_entries:
+            break
+        for slug, _ in page_entries:
+            if len(slug_set) >= max_films:
+                break
+            slug_set.add(slug)
+        time.sleep(_REQUEST_DELAY)
+    _timer_stop()
+
+    _timer_start("  resolve slugs -> TMDB")
+    weighted: dict[int, float] = {}
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        fut = {pool.submit(_resolve_slug_parallel, slug): slug for slug in slug_set}
+        for future in as_completed(fut):
+            slug = fut[future]
+            try:
+                _, tmdb_id = future.result()
+                if tmdb_id:
+                    weighted[tmdb_id] = 0.5  # fixed: 2.5★ = "curious"
+            except Exception as e:
+                logger.debug("Slug resolution failed for '%s': %s", slug, e)
+    _timer_stop()
+
+    cache_path.write_text(json.dumps({str(k): v for k, v in weighted.items()}, indent=2))
+    cache_path.chmod(0o600)
+    _timer_stop()
+    return weighted
 
 
 def fetch_letterboxd_watched(

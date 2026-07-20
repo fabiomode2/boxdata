@@ -112,55 +112,52 @@ Implementado en `src/recommender.py:_feature_rerank`. Integrado en `_recommend_p
 
 ---
 
-## Fase 3: Embeddings con LLM (~finde)
+## Fase 3: Embeddings con LLM ✅ (Jul 2026, implementado + evaluado)
 
-Ver plan detallado en [`embedding-upgrade-plan.md`](./embedding-upgrade-plan.md).
+**Resultado: mejora ~9% MAE, ~7% P@5.** Mimo-v2.5-free (OpenCode Zen gratis) ganó vs phi3:mini y llama3.2:3b.
 
-### Opciones de generación de texto
+### Comparativa (629 pelis dev, 4 usuarios eval)
 
-| Opción | Modelo | Tiempo ~4,800 pelis | Coste | Calidad texto |
-|--------|--------|--------------------|-------|---------------|
-| A | llama3.2:3b (local, RTX 2050) | 13-30h | $0 | Baja (modelo 3B) |
-| B | phi3:mini (local, RTX 2050) | 8-20h | $0 | Media-baja |
-| C | **DeepSeek V4 Flash** (OpenCode Go) | ~30-60 min | $10/mes (incluido) | Alta (modelo grande) |
+| Variante | Texto | MAE | P@5 |
+|----------|-------|-----|-----|
+| Baseline | `enriched_text()` actual | 0.1353 | 0.625 |
+| **mimo-v2.5-free** (OpenCode Zen) | Prompt 80 palabras | **0.1230** | **0.667** |
 
-OpenCode Go incluye ~31,650 peticiones cada 5h con DeepSeek V4 Flash, más que suficiente para 4,800 pelis.
+phi3:mini y llama3.2:3b se probaron pero se descartaron por calidad inferior y velocidad (~10s/peli vs ~2s/peli de mimo).
 
-### Estrategia de comparación
+### Prompt final
 
-1. Seleccionar 100 pelis de prueba representativas (variadas en géneros, décadas, popularidad)
-2. Generar `llm_text` con modelo local (phi3:mini o llama3.2:3b) para esas 100
-3. Generar `llm_text` con DeepSeek V4 Flash para las mismas 100
-4. Embedear ambos conjuntos (`python main.py embed --input data/movies_llm_test.jsonl`)
-5. Evaluar con `python main.py evaluate --users alice bob` (Fase 1)
-6. Comparar MAE, nDCG@k, MRR → elegir ganador
-7. Lanzar batch completo con la opción ganadora
+```
+Write a compact 80-word description of this movie for a recommendation system.
+Focus on factual plot, genre, style, and tone. Be specific — avoid clichés and fluff.
 
-### TextGenerator abstracto (ya implementado)
+Title: {title} ({year})
+Director: {director}
+Cast: {cast}
+Genres: {genres}
+Overview: {overview}
+Rating: {rating}/10 ({votes} votes)
+Reviews: {reviews}
+```
 
-`src/llm_text_generator.py` soporta múltiples proveedores vía parámetro `provider`:
-- `provider="ollama"`: modelo local (llama3.2:3b, phi3:mini, etc.)
-- `provider="openai"`: cualquier API compatible OpenAI (DeepSeek V4 Flash vía OpenCode Go, OpenAI, etc.)
+Claves: 80 palabras (embedding denso), sin pedir critical reception (evita alucinación), Reviews opcional, propósito explícito.
 
-El swap entre local/cloud no requiere cambios de código — solo parámetros CLI. Si OpenCode Go cambia precio/disponibilidad, se puede migrar a otro proveedor OpenAI-compatible sin reescribir.
+### Pipeline final
 
-### Modificaciones respecto al plan original
+```
+movies.jsonl (67k) → filter (≥5.0 + ≥500 votes) → movies_filtered.jsonl (~7.7k)
+→ llm-text --provider openai --model mimo-v2.5-free (ThreadPoolExecutor 10 workers)
+→ movies_llm_text.jsonl → embed → ChromaDB
+```
 
-- ❌ **Sin keywords**: no justifican el tiempo de API (~20 min) ni los tokens extra
-- ✅ **Incluir `top_reviews` en el prompt del LLM** — `src/review_fetcher.py` ya implementa el fetching
-- ✅ **Ejecutar evaluation framework antes/después** para validar la mejora
-- ✅ **Cast en metadata** ya disponible (review_fetcher no modifica cast, collector ya lo guarda)
+Watchlist boost: `fetch_letterboxd_watchlist()` asigna rating fijo 0.5 (2.5★) a cada peli en watchlist, integrado en kernel regression.
 
-### Tiempo estimado (realista)
+### Lecciones
 
-Con llama3.2:3b en RTX 2050 (4GB VRAM):
-
-| Escenario | Tiempo por peli | Total ~4,800 pelis |
-|-----------|----------------|-------------------|
-| Optimista | 5-7s | 7-9h |
-| Realista | 10-15s | **13-20h** |
-
-**Recomendación**: probar con 50 pelis primero y extrapolar antes de lanzar el batch completo.
+1. OpenCode Zen `mimo-v2.5-free` es mejor que `deepseek-v4-flash-free` para texto descriptivo (no gasta tokens en reasoning)
+2. Prompt de 80 palabras da embeddings más densos que 300 palabras (menos ruido)
+3. Watchlist como señal débil (0.5) es más elegante que bonus externo
+4. `sort_by=popularity.desc` en TMDB discover pierde pelis mainstream (Knives Out, Black Widow, Benjamin Button). Complementar con `sort_by=vote_count.desc`
 
 ---
 
@@ -216,17 +213,9 @@ Cubren: cosine similarity, RRF reranking, weighted k-means, enriched text, geome
 |------|-----|----------|---------|--------|------------|
 | **1** | Evaluation framework | ~2 días | Muy alto (desbloquea métricas) | ✅ Implementado (Jul 2026) | Nada |
 | **2** | Feature reranking | ~2h | Alto (perceptible) | ✅ Completado (Jul 2026) | Nada |
-| **3** | Embeddings con LLM | ~finde | Medio-Alto | Pendiente | Fase 1 (para medir mejora) |
-| **4** | CF + Hybrid | ~1 semana | Alto | Pendiente | Fase 1 + 50 usuarios con 100+ ratings |
+| **3** | Embeddings con LLM | ~1 día | Medio (~9% MAE) | ✅ Completo (Jul 2026) | Fase 1 |
+| **4** | CF + Hybrid | ~1 semana | Alto | Pendiente (trigger: 50+ usuarios) | Fase 1 + data |
 
-### Orden de ejecución recomendado
+### Fase 3 completada
 
-```
-Semana 1:  Fase 1 (evaluation framework + tests)
-           Validar con datos reales (métricas baseline)
-           Test cualitativo de 50 pelis (Fase 3 preview)
-
-Semana 2:  Fase 3 (embeddings con LLM, validado con Fase 1)
-           Comparar local vs cloud (100 pelis test)
-           Decidir si Fase 4 merece la pena (contar usuarios)
-```
+Resultados en sección superior. Watchlist boost añadido como bonus. Pipeline listo para re-embed producción con ≥5.0+≥500.

@@ -182,6 +182,18 @@ Skills loaded for BoxData development:
 - Renamed `imdb_enricher.py` → `imdbapi_enricher.py` (clarifies it uses imdbapi.dev, not official IMDb)
 - Added OpenCode Go / DeepSeek V4 Flash strategy to embedding upgrade plan
 
+### Jul 2026 — Fase 3: LLM Embeddings (plan_actual_temp)
+- Added `llm_text: str | None` field to Movie dataclass (`src/models.py:27`)
+- `enriched_text()` now returns `llm_text` when set, else falls back to `_build_enriched_text()`
+- `vector_store.py` now supports multiple ChromaDB paths via `db_path` param (dict-keyed clients/collections)
+- `index_movies()` accepts `overwrite=True` flag → uses `col.upsert()` instead of `col.add()`
+- `embed` command: `--overwrite`, `--db-path` flags
+- `evaluate` command: `--db-path` flag (threaded through `evaluate_user` → `_fetch_user_embeddings` → `get_collection`)
+- `llm-text` command: `--workers` for `ThreadPoolExecutor` (OpenAI provider), prompt includes `top_reviews`, `Reviews:` field in PROMPT_TEMPLATE
+- `.env.example`: added `OPENCODE_API_KEY`
+- 11 new tests (test_models:3, test_indexer:2, test_vector_store:1, test_llm_text_generator:2, plus 3 existing expanded) — 67 total, all passing
+- Plan file `docs/plan_actual_temp.md` deleted per lifecycle rules
+
 ### Jul 2026 — Codebase Cleanup & Review Fetcher
 - Fixed broken test `test_best_vote_data_prefers_imdb` → `test_tmdb_vote_data_uses_tmdb_only`
 - Renamed `_best_vote_data` → `_tmdb_vote_data` for consistency

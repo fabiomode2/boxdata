@@ -1,11 +1,9 @@
 export async function resolveAvatar(username) {
   try {
-    const res = await fetch(
-      `https://api.microlink.io/?url=https://letterboxd.com/${username}/`
-    )
+    const res = await fetch(`/api/avatar/${encodeURIComponent(username)}`)
     if (!res.ok) return null
     const data = await res.json()
-    return data?.data?.image?.url || null
+    return data?.avatar_url || null
   } catch {
     return null
   }

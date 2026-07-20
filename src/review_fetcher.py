@@ -2,7 +2,7 @@
 
 import logging
 
-from src.collector import _tmdb_get
+from src.collector import tmdb_get
 from src.models import Movie
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,7 @@ def fetch_top_reviews(tmdb_id: int, max_reviews: int = 3) -> list[str]:
     """
     url = f"https://api.themoviedb.org/3/movie/{tmdb_id}/reviews"
     try:
-        data = _tmdb_get(url)
+        data = tmdb_get(url)
     except Exception as e:
         logger.debug("Review fetch failed for TMDB %d: %s", tmdb_id, e)
         return []
