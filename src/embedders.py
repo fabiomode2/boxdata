@@ -8,7 +8,7 @@ class Embedder(Protocol):
 
 
 class OllamaEmbedder:
-    def __init__(self, model: str = "nomic-embed-text", host: str = "http://localhost:11434") -> None:
+    def __init__(self, model: str = "nomic-embed-text", host: str | None = None) -> None:
         import ollama
         self._client = ollama.Client(host=host)
         self._model = model
