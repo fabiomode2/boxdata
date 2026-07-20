@@ -4,40 +4,49 @@ import chromadb
 from pathlib import Path
 
 DB_DIR = Path(__file__).resolve().parent.parent / "data"
+DEFAULT_CHROMA_DIR = DB_DIR / "chroma_db"
 
-_client: chromadb.PersistentClient | None = None
-_collection: chromadb.Collection | None = None
-
-
-def get_client() -> chromadb.PersistentClient:
-    global _client
-    if _client is None:
-        DB_DIR.mkdir(parents=True, exist_ok=True)
-        _client = chromadb.PersistentClient(str(DB_DIR / "chroma_db"))
-    return _client
+_clients: dict[str, chromadb.PersistentClient] = {}
+_collections: dict[str, chromadb.Collection] = {}
 
 
-def get_collection(name: str = "movies") -> chromadb.Collection:
-    global _collection
-    if _collection is None:
-        client = get_client()
-        _collection = client.get_or_create_collection(
+def _chroma_path(db_path: str | None = None) -> str:
+    return str(Path(db_path).resolve()) if db_path else str(DEFAULT_CHROMA_DIR)
+
+
+def _collection_key(name: str = "movies", db_path: str | None = None) -> str:
+    return f"{_chroma_path(db_path)}:{name}"
+
+
+def get_client(db_path: str | None = None) -> chromadb.PersistentClient:
+    path = _chroma_path(db_path)
+    if path not in _clients:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        _clients[path] = chromadb.PersistentClient(path)
+    return _clients[path]
+
+
+def get_collection(name: str = "movies", db_path: str | None = None) -> chromadb.Collection:
+    key = _collection_key(name, db_path)
+    if key not in _collections:
+        client = get_client(db_path=db_path)
+        _collections[key] = client.get_or_create_collection(
             name=name,
             metadata={"hnsw:space": "cosine"},
         )
-    return _collection
+    return _collections[key]
 
 
-def count_movies() -> int:
-    col = get_collection()
+def count_movies(db_path: str | None = None) -> int:
+    col = get_collection(db_path=db_path)
     return col.count()
 
 
-def delete_collection(name: str = "movies") -> None:
+def delete_collection(name: str = "movies", db_path: str | None = None) -> None:
     """Drop the entire collection from ChromaDB. All embeddings gone."""
-    global _collection
-    _collection = None
-    client = get_client()
+    key = _collection_key(name, db_path)
+    _collections.pop(key, None)
+    client = get_client(db_path=db_path)
     try:
         client.delete_collection(name)
     except ValueError:

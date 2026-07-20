@@ -11,8 +11,16 @@ Usage:
   python main.py recommend --user alice bob  [--n 10]
 """
 import argparse
+import json
 import logging
+from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from src.cli import build_parsers
+from src.recommender import rank_watchlist
 from src.vector_store import count_movies
 
 logger = logging.getLogger(__name__)
@@ -35,10 +43,19 @@ def _show_help(parser: argparse.ArgumentParser) -> None:
           --skip-credits    Saltar fetch de créditos
           --skip-imdb       Saltar enrichment de IMDb API (subgéneros, metacritic)
 
- EMBEDDINGS:
-   python main.py embed                    Generar embeddings (Ollama + nomic-embed-text)
+  EMBEDDINGS:
+    python main.py embed                    Generar embeddings (Ollama + nomic-embed-text)
+    python main.py filter                   Filtrar peliculas por rating y votos
 
- ESTADO:
+  LLM ENRICHMENT:
+    python main.py llm-text                 Generar textos descriptivos con LLM
+
+  EVALUACIÓN:
+    python main.py evaluate --users alice bob
+          --k N             Número de folds (default: 5)
+          --output FILE     Guardar resultados en JSON
+
+  ESTADO:
    python main.py count                    Películas en ChromaDB
    python main.py clear-db                 Borrar toda la base vectorial
 
@@ -46,7 +63,7 @@ def _show_help(parser: argparse.ArgumentParser) -> None:
    python main.py analyze --export DIR
          --export DIR      Ruta al export .csv de Letterboxd
 
- RECOMENDACIONES:
+  RECOMENDACIONES:
    python main.py recommend --ids 550 680
          --ids TMDB_ID     IDs de TMDB que le gustan a un usuario
 
@@ -79,64 +96,7 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
-    parser = argparse.ArgumentParser(description="BoxData — movie recommendation system")
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    collect_p = sub.add_parser("collect", help="Fetch movies from TMDB → JSONL")
-    collect_p.add_argument("--start", type=int, default=1900)
-    collect_p.add_argument("--end", type=int, default=None)
-    collect_p.add_argument("--max-per-year", type=int, default=100)
-    collect_p.add_argument("--test", action="store_true", help="Only 2 years")
-    collect_p.add_argument("--skip-credits", action="store_true", help="Skip TMDB credits")
-    collect_p.add_argument("--skip-imdb", action="store_true", help="Skip IMDb API enrichment")
-
-    sub.add_parser("embed", help="Generate embeddings from JSONL → ChromaDB")
-    sub.add_parser("count", help="Show movie count in ChromaDB")
-    sub.add_parser("clear-db", help="Delete ALL embeddings from ChromaDB")
-    sub.add_parser("explore", help="UMAP + HDBSCAN + Plotly visualization of the embedding space")
-
-    analyze_p = sub.add_parser("analyze", help="Analyze your Letterboxd taste profile")
-    analyze_p.add_argument("--export", type=str, required=True,
-                           help="Path to Letterboxd export directory")
-
-    rec_p = sub.add_parser("recommend", help="Recommend movies for 1+ users")
-    rec_p.add_argument("--query", type=str, metavar="TEXT",
-                       help="Free-text description of what you want to watch")
-    rec_p.add_argument("--query-weight", type=float, default=0.3,
-                       help="How much the query influences results (0–1, default 0.3)")
-    rec_ids = rec_p.add_mutually_exclusive_group()
-    rec_ids.add_argument("--ids", type=int, nargs="+", metavar="TMDB_ID",
-                         help="TMDB IDs of movies one user likes")
-    rec_ids.add_argument("--user", type=str, nargs="+", metavar="USERNAME",
-                         help="Letterboxd usernames to scrape")
-    rec_ids.add_argument("--export", type=str, metavar="DIR",
-                         help="Path to Letterboxd export directory")
-    rec_p.add_argument("--n", type=int, default=10, help="Number of recommendations")
-    rec_p.add_argument(    "--min-votes", type=int, default=2000,
-                        help="Minimum vote_count filter")
-    rec_p.add_argument("--no-cache", action="store_true",
-                        help="Ignore cached scraped profiles")
-    rec_p.add_argument("--sigma", type=float, default=0.3, metavar="SIGMA",
-                       help="Kernel bandwidth for rating prediction (default 0.3)")
-    rec_p.add_argument("--auto-sigma", action="store_true",
-                       help="Auto-calibrate sigma per user via cross-validation (overrides --sigma)")
-    rec_p.add_argument("--max-distance", type=float, default=0.3, metavar="DIST",
-                       help="Max cosine distance for history matches (0-1, -1=no limit, default 0.3)")
-    rec_p.add_argument("--diversity", type=float, default=0.0, metavar="LAM",
-                        help="Diversity in results (0=relevance, 1=variety, default 0)")
-    rec_p.add_argument("--genre", type=str, default=None, metavar="GENRES",
-                        help="Filter by genres (comma-separated, e.g. 'Drama,Thriller')")
-    rec_p.add_argument("--min-year", type=int, default=None, metavar="YEAR",
-                        help="Minimum release year (e.g. 2000)")
-    rec_p.add_argument("--max-year", type=int, default=None, metavar="YEAR",
-                        help="Maximum release year (e.g. 2020)")
-    rec_p.add_argument("--min-rating", type=float, default=6.5, metavar="RATING",
-                        help="Minimum TMDB vote average (default 6.5)")
-    rec_p.add_argument("--randomize", action="store_true",
-                        help="Randomize discovery seeds for varied results")
-
-    sub.add_parser("help", help="Show this help message")
-
+    parser = build_parsers()
     args = parser.parse_args()
 
     if args.command == "help":
@@ -145,10 +105,10 @@ def main() -> None:
 
     if args.command == "collect":
         from src.collect_runner import run_collect
-        run_collect(args.start, args.end, args.max_per_year, args.test, args.skip_credits, args.skip_imdb)
+        run_collect(args.start, args.end, args.max_per_year, args.test, args.skip_credits, args.skip_imdb, args.skip_reviews)
     elif args.command == "embed":
         from src.embed_runner import run_embed
-        run_embed()
+        run_embed(input_file=args.input, overwrite=args.overwrite, db_path=args.db_path)
     elif args.command == "count":
         logger.info("Movies in ChromaDB: %s", count_movies())
     elif args.command == "clear-db":
@@ -157,13 +117,48 @@ def main() -> None:
         logger.info("ChromaDB collection deleted. Run `python main.py embed` to rebuild.")
     elif args.command == "analyze":
         _run_analyze(args)
+    elif args.command == "evaluate":
+        _run_evaluate(args)
     elif args.command == "recommend":
         _run_recommend(args)
     elif args.command == "explore":
         from src.explorer import run_explore
         run_explore()
-
-
+    elif args.command == "filter":
+        from src.filter_runner import run_filter
+        stats = run_filter(
+            min_rating=args.min_rating,
+            min_votes=args.min_votes,
+            input_file=args.input,
+            output_file=args.output,
+        )
+        if "error" not in stats:
+            print(f"\nFiltered: {stats['filtered']}/{stats['total']} movies kept "
+                  f"(dropped {stats['dropped']})")
+            print(f"Output: {stats['output']}")
+    elif args.command == "llm-text":
+        from src.llm_text_generator import run_llm_text
+        api_key = args.api_key
+        if args.provider == "openai" and not api_key:
+            import os
+            api_key = os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY")
+        stats = run_llm_text(
+            input_file=args.input,
+            output_file=args.output,
+            model=args.model,
+            provider=args.provider,
+            api_base=args.api_base,
+            api_key=api_key,
+            ollama_host=args.ollama_host,
+            delay=args.delay,
+            workers=args.workers,
+        )
+        if "error" not in stats:
+            print(f"\nGenerated: {stats['generated']}/{stats['total']} movies "
+                  f"({stats['elapsed_min']} min)")
+            print(f"Output: {stats['output']}")
+    elif args.command == "rank-watchlist":
+        _run_rank_watchlist(args)
 
 
 def _run_recommend(args: argparse.Namespace) -> None:
@@ -182,10 +177,19 @@ def _run_recommend(args: argparse.Namespace) -> None:
             if found_ids:
                 user_weighted.append(weighted)
     elif args.user:
+        from src.scraper import fetch_letterboxd_watchlist
         for username in args.user:
             logger.info("Scraping Letterboxd: %s...", username)
             weighted = fetch_letterboxd_watched(username, no_cache=args.no_cache)
-            logger.info("  Found %d films. Checking embeddings...", len(weighted))
+            wl_count = 0
+            if not args.no_watchlist:
+                watchlist = fetch_letterboxd_watchlist(username, no_cache=args.no_cache)
+                wl_count = len(watchlist)
+                for tid, rating in watchlist.items():
+                    if tid not in weighted:
+                        weighted[tid] = rating
+            logger.info("  %d watched + %d watchlist = %d total", len(weighted) - wl_count, wl_count, len(weighted))
+            logger.info("  Checking embeddings...")
             vec, found_ids, total = get_taste_vector(weighted)
             logger.info("  → %d/%d in ChromaDB", len(found_ids), total)
             if found_ids:
@@ -221,6 +225,7 @@ def _run_recommend(args: argparse.Namespace) -> None:
 
     logger.info("\nFinding recommendations for %d user(s)...", len(user_weighted))
     effective_sigma = None if args.auto_sigma else args.sigma
+    feature_rerank = not args.no_feature_rerank
     if args.query:
         recs = recommend_hybrid(
             user_weighted, args.query,
@@ -231,6 +236,7 @@ def _run_recommend(args: argparse.Namespace) -> None:
             min_year=args.min_year, max_year=args.max_year,
             min_rating=args.min_rating,
             randomize=args.randomize,
+            feature_rerank=feature_rerank,
         )
     else:
         recs = recommend_for_group(
@@ -240,6 +246,7 @@ def _run_recommend(args: argparse.Namespace) -> None:
             min_year=args.min_year, max_year=args.max_year,
             min_rating=args.min_rating,
             randomize=args.randomize,
+            feature_rerank=feature_rerank,
         )
 
     _print_recommendations(recs)
@@ -294,6 +301,91 @@ def _run_analyze(args: argparse.Namespace) -> None:
     print()
     print(format_profile_report(stats))
 
+
+def _run_evaluate(args: argparse.Namespace) -> None:
+    from src.evaluator import evaluate_users, _print_evaluation_results, _average_results
+    from src.recommender import fetch_letterboxd_watched
+    from src.profile import parse_export, resolve_tmdb_ids
+
+    user_weighted: list[dict[int, float]] = []
+    usernames: list[str] = []
+
+    if args.export:
+        logger.info("Loading Letterboxd export: %s...", args.export)
+        profile = parse_export(args.export)
+        profile = resolve_tmdb_ids(profile, resolve_watchlist=False)
+        weighted: dict[int, float] = {}
+        for f in profile.watched:
+            if f.tmdb_id:
+                w = f.rating / 5.0 if f.rating is not None else 0.6
+                weighted[f.tmdb_id] = w
+        if weighted:
+            user_weighted.append(weighted)
+            usernames.append(profile.username)
+    elif args.users:
+        for username in args.users:
+            logger.info("Scraping Letterboxd: %s...", username)
+            weighted = fetch_letterboxd_watched(username, no_cache=args.no_cache)
+            if weighted:
+                user_weighted.append(weighted)
+                usernames.append(username)
+
+    if not user_weighted:
+        logger.info("No user data to evaluate.")
+        return
+
+    logger.info("Evaluating %d user(s) with %d-fold CV...", len(user_weighted), args.k)
+    results = evaluate_users(
+        user_weighted, usernames=usernames, n_folds=args.k, sigma=args.sigma,
+        db_path=args.db_path,
+    )
+
+    _print_evaluation_results(results)
+
+    avg = _average_results(results)
+    if avg:
+        print(f"  {'─' * 85}")
+        _print_evaluation_results([avg])
+
+    if args.output:
+        out_path = Path(args.output)
+        out_path.write_text(json.dumps(results, indent=2, default=str))
+        logger.info("Results saved to %s", out_path)
+
+
+def _run_rank_watchlist(args: argparse.Namespace) -> None:
+    genre_filter = [g.strip() for g in args.genre.split(",") if g.strip()] if args.genre else None
+    sigma = None if args.auto_sigma else args.sigma
+
+    recs = rank_watchlist(
+        args.export,
+        n=args.n,
+        min_vote_count=args.min_votes,
+        sigma=sigma,
+        genre_filter=genre_filter,
+        min_year=args.min_year,
+        max_year=args.max_year,
+        min_rating=args.min_rating,
+        auto_sigma=args.auto_sigma,
+    )
+
+    if not recs:
+        return
+
+    out = []
+    out.append(f"\n{'':4s}Title{'':35s}Year  Genres{'':20s}Predicted★  Score")
+    out.append("-" * 90)
+    for i, r in enumerate(recs, 1):
+        title = r["title"][:38]
+        genres = r["genres"][:22]
+        year = r["year"]
+        stars = r["predicted_stars"]
+        score = r["predicted_rating"]
+        out.append(f"{i:2d}. {title:38s} {year:<5d} {genres:22s} {stars:<5.2f}★  {score:.4f}")
+    out.append("")
+    for r in recs:
+        out.append(f"  {r['url']} — {r['title']}")
+    print("\n".join(out))
 
 
 if __name__ == "__main__":

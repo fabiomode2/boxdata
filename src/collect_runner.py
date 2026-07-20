@@ -42,7 +42,7 @@ def _max_year_in_jsonl() -> int | None:
 
 def run_collect(
     start: int, end: int | None, max_per_year: int, test: bool,
-    skip_credits: bool, skip_imdb: bool,
+    skip_credits: bool, skip_imdb: bool, skip_reviews: bool = False,
 ) -> None:
     if end is None:
         end = date.today().year
@@ -53,8 +53,8 @@ def run_collect(
     if not test and collected_ids:
         last_year = _max_year_in_jsonl()
         if last_year is not None and last_year >= start:
-            logger.info("Resuming from year %d (was %d)", last_year, start)
-            start = last_year
+            logger.info("Resuming from year %d (was %d)", last_year + 1, start)
+            start = last_year + 1
 
     years = list(range(start, end + 1))
     if test:
@@ -71,6 +71,7 @@ def run_collect(
                 skip_credits=skip_credits,
                 seen_ids=collected_ids,
                 enrich=not skip_imdb,
+                enrich_reviews=not skip_reviews,
             )
             for movie in movies:
                 d = asdict(movie)
