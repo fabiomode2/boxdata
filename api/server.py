@@ -270,7 +270,8 @@ async def recommend(request: Request, req: RecommendRequest, _auth=Depends(verif
 
 @app.get("/api/job/{job_id}", response_model=JobStatus)
 @limiter.limit("120/minute")
-async def get_job(request: Request, job_id: str, _auth=Depends(verify_api_key)):
+async def get_job(request: Request, job_id: str):
+    """Public endpoint (no auth) — job_id is a random UUID, safe to expose."""
     with _jobs_lock:
         job = _jobs.get(job_id)
     if not job:
