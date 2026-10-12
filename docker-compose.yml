@@ -20,6 +20,7 @@ services:
       - .env
     environment:
       - OLLAMA_HOST=http://ollama:11434
+      - DISABLE_DOCS=1
     volumes:
       - ./data:/app/data
     depends_on:

@@ -42,7 +42,13 @@ async def verify_api_key(x_api_key: str | None = Header(None)):
 
 
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI(title="BoxData API")
+_DOCS_DISABLED = os.getenv("DISABLE_DOCS", "0") == "1"
+app = FastAPI(
+    title="BoxData API",
+    docs_url=None if _DOCS_DISABLED else "/docs",
+    redoc_url=None if _DOCS_DISABLED else "/redoc",
+    openapi_url=None if _DOCS_DISABLED else "/openapi.json",
+)
 app.state.limiter = limiter
 app.add_exception_handler(429, _rate_limit_exceeded_handler)
 
@@ -215,6 +221,12 @@ def _run_recommend_job(job_id: str, req: RecommendRequest):
         print(f"  ❌ Job {job_id} failed: {e}", file=sys.stderr, flush=True)
 
 
+@app.get("/")
+@limiter.limit("30/minute")
+async def root(request: Request):
+    return {"service": "BoxData API", "status": "ok", "health": "/health"}
+
+
 @app.get("/health")
 @limiter.limit("30/minute")
 async def health(request: Request):
@@ -228,20 +240,25 @@ OG_RE = re.compile(r'<meta\s+property="og:image"\s+content="([^"]+)"')
 async def avatar(request: Request, username: str, _auth=Depends(verify_api_key)):
     if not re.match(r"^[a-zA-Z0-9_-]{1,50}$", username):
         raise HTTPException(status_code=400, detail="Invalid username")
-    try:
-        resp = await asyncio.to_thread(
-            requests.get,
-            f"https://letterboxd.com/{username}/",
-            impersonate="safari17_0",
-            timeout=15,
-        )
-        resp.raise_for_status()
-        m = OG_RE.search(resp.text)
-        if not m:
-            return {"avatar_url": None}
-        return {"avatar_url": m.group(1)}
-    except Exception:
-        return {"avatar_url": None}
+    url = f"https://letterboxd.com/{username}/"
+    # Letterboxd (Cloudflare) intermittently serves challenge pages to
+    # datacenter IPs; retry with backoff until a real page comes through.
+    for attempt in range(4):
+        try:
+            resp = await asyncio.to_thread(
+                requests.get,
+                url,
+                impersonate="safari17_0",
+                timeout=15,
+            )
+            if resp.status_code == 200 and "Just a moment" not in resp.text:
+                m = OG_RE.search(resp.text)
+                return {"avatar_url": m.group(1) if m else None}
+        except Exception:
+            logger.debug("Avatar fetch attempt %d failed for %s", attempt + 1, username)
+        if attempt < 3:
+            await asyncio.sleep(2.0 * (attempt + 1))
+    return {"avatar_url": None}
 
 @app.post("/api/recommend", status_code=202)
 @limiter.limit("30/minute")

@@ -18,8 +18,15 @@ from src.timers import _timer_start, _timer_stop
 logger = logging.getLogger(__name__)
 
 _MAX_PAGES = 10
-_PAGE_WORKERS = 5
 _SLUG_WORKERS = 15
+
+# Cloudflare serves intermittent "Just a moment..." challenge pages (403, or a
+# 200 JS shell without the film grid) to datacenter IPs. Retry with backoff
+# rides over the challenge window; a single warmed session then gets real pages.
+_RETRY_MAX_ATTEMPTS = 5
+_RETRY_BASE_DELAY = 2.5
+_PAGE_DELAY = 1.0
+_CHALLENGE_MARKER = "Just a moment"
 
 _CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 _CACHE_TTL = 86400
@@ -74,6 +81,32 @@ def _save_cache(username: str, data: dict[int, float]) -> None:
     path.chmod(0o600)
 
 
+def _get_with_retry(
+    session, url: str, max_attempts: int = _RETRY_MAX_ATTEMPTS,
+    base_delay: float = _RETRY_BASE_DELAY,
+):
+    """GET with backoff. Retries non-200 and Cloudflare challenge pages.
+
+    Returns the last response object (may still be a challenge/non-200), or
+    None when every attempt raised a transport error.
+    """
+    resp = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = session.get(url, timeout=20)
+        except CurlError as e:
+            logger.debug("GET %s failed (%s), attempt %d", url, e, attempt)
+            resp = None
+        if resp is not None and resp.status_code == 200 and _CHALLENGE_MARKER not in resp.text:
+            return resp
+        if attempt < max_attempts:
+            delay = base_delay * attempt
+            if resp is not None and resp.status_code == 200:
+                logger.debug("Challenge page for %s, retrying in %.1fs", url, delay)
+            time.sleep(delay)
+    return resp
+
+
 def fetch_letterboxd_watchlist(
     username: str, max_films: int = 200, no_cache: bool = False,
     progress: dict | None = None,
@@ -90,38 +123,26 @@ def fetch_letterboxd_watchlist(
     print(f"[BOXSCRAPE] Starting watchlist scrape for {username}", file=sys.stderr, flush=True)
     scraper = get_curl_session()
 
-    _timer_start("  scrape watchlist pages (parallel)")
+    _timer_start("  scrape watchlist pages")
     slug_set: set[str] = set()
-    page_stop = threading.Event()
 
-    def _fetch_page(page: int) -> list[str]:
-        if page_stop.is_set():
-            return []
+    for page in range(1, _MAX_PAGES + 1):
         url = f"{LETTERBOXD_BASE}/{username}/watchlist/page/{page}/"
         print(f"[BOXSCRAPE] GET {url}", file=sys.stderr, flush=True)
-        resp = scraper.get(url, timeout=20)
-        if resp.status_code != 200:
-            return []
+        resp = _get_with_retry(scraper, url)
+        if resp is None or resp.status_code != 200:
+            print(f"[BOXSCRAPE] Giving up on watchlist page {page} (HTTP {getattr(resp, 'status_code', None)})", file=sys.stderr, flush=True)
+            break
         entries = _extract_film_page_entries(resp.text)
         if not entries:
-            page_stop.set()
-            return []
-        time.sleep(0.3)
-        return [slug for slug, _ in entries]
-
-    with ThreadPoolExecutor(max_workers=_PAGE_WORKERS) as pool:
-        fut = {pool.submit(_fetch_page, p): p for p in range(1, _MAX_PAGES + 1)}
-        for f in as_completed(fut):
-            try:
-                for slug in f.result():
-                    if len(slug_set) >= max_films:
-                        break
-                    slug_set.add(slug)
-            except Exception as e:
-                logger.debug("Watchlist page fetch failed: %s", e)
-
-    for f in fut:
-        f.cancel()
+            break
+        for slug, _ in entries:
+            if len(slug_set) >= max_films:
+                break
+            slug_set.add(slug)
+        if len(slug_set) >= max_films:
+            break
+        time.sleep(_PAGE_DELAY)
     _timer_stop()
 
     if not slug_set:
@@ -176,44 +197,27 @@ def fetch_letterboxd_watched(
     if progress is not None:
         progress.update(user=username, phase="pages")
 
-    _timer_start("  scrape pages (parallel)")
+    _timer_start("  scrape pages")
     slug_ratings: dict[str, float] = {}
     scraper = get_curl_session()
-    page_stop = threading.Event()
 
-    def _fetch_page(page: int) -> list[tuple[str, float]]:
-        if page_stop.is_set():
-            return []
+    for page in range(1, _MAX_PAGES + 1):
         url = f"{LETTERBOXD_BASE}/{username}/films/page/{page}/"
         print(f"[BOXSCRAPE] GET {url}", file=sys.stderr, flush=True)
-        resp = scraper.get(url, timeout=20)
-        print(f"[BOXSCRAPE] HTTP {resp.status_code} (len={len(resp.text)})", file=sys.stderr, flush=True)
-        if resp.status_code != 200:
-            print(f"[BOXSCRAPE] BODY={resp.text[:300]}", file=sys.stderr, flush=True)
-            return []
+        resp = _get_with_retry(scraper, url)
+        if resp is None or resp.status_code != 200:
+            print(f"[BOXSCRAPE] Giving up on page {page} (HTTP {getattr(resp, 'status_code', None)})", file=sys.stderr, flush=True)
+            break
         entries = _extract_film_page_entries(resp.text)
         if not entries:
-            page_stop.set()
-            return []
-        time.sleep(0.3)
-        return entries
-
-    with ThreadPoolExecutor(max_workers=_PAGE_WORKERS) as pool:
-        fut = {pool.submit(_fetch_page, p): p for p in range(1, _MAX_PAGES + 1)}
-        for f in as_completed(fut):
-            try:
-                entries = f.result()
-                if not entries:
-                    continue
-                for slug, rating_norm in entries:
-                    if len(slug_ratings) >= max_films:
-                        break
-                    slug_ratings[slug] = max(slug_ratings.get(slug, 0), rating_norm)
-            except Exception as e:
-                logger.debug("Page fetch failed: %s", e)
-
-    for f in fut:
-        f.cancel()
+            break
+        for slug, rating_norm in entries:
+            if len(slug_ratings) >= max_films:
+                break
+            slug_ratings[slug] = max(slug_ratings.get(slug, 0), rating_norm)
+        if len(slug_ratings) >= max_films:
+            break
+        time.sleep(_PAGE_DELAY)
     _timer_stop()
 
     if not slug_ratings:
@@ -296,10 +300,10 @@ def _resolve_slug_parallel(slug: str, stop_event: threading.Event | None = None)
         url = f"{LETTERBOXD_BASE}/film/{slug}/"
         try:
             scraper = get_curl_session()
-            resp = scraper.get(url, timeout=20)
+            resp = _get_with_retry(scraper, url, max_attempts=3, base_delay=2.0)
             if stop_event and stop_event.is_set():
                 return slug, None
-            if resp.status_code != 200:
+            if resp is None or resp.status_code != 200:
                 return slug, None
             soup = BeautifulSoup(resp.text, "html.parser")
             el = soup.select_one('[data-tmdb-id]')
