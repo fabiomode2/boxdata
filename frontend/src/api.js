@@ -2,7 +2,7 @@ const VPS_API = 'https://boxdata.cesura.duckdns.org'
 
 export async function resolveAvatar(username) {
   try {
-    const res = await fetch(`/api/avatar/${encodeURIComponent(username)}`)
+    const res = await fetch(`/api/avatar?username=${encodeURIComponent(username)}`)
     if (!res.ok) return null
     const data = await res.json()
     return data?.avatar_url || null
