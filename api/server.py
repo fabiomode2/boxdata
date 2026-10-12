@@ -12,7 +12,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from curl_cffi import requests
 from fastapi import Depends, FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
@@ -27,6 +26,7 @@ from src.recommender import (
     recommend_hybrid,
 )
 from src.scraper import fetch_letterboxd_watchlist
+from src.session import get_curl_session
 from src.vector_store import count_movies
 
 logger = logging.getLogger(__name__)
@@ -235,30 +235,27 @@ async def health(request: Request):
 
 OG_RE = re.compile(r'<meta\s+property="og:image"\s+content="([^"]+)"')
 
+def _fetch_avatar_url(username: str) -> str | None:
+    """Og:image avatar URL. Retries: Cloudflare challenges datacenter IPs."""
+    session = get_curl_session()
+    for attempt in range(6):
+        try:
+            resp = session.get(f"https://letterboxd.com/{username}/", timeout=15)
+            if resp.status_code == 200 and "Just a moment" not in resp.text:
+                m = OG_RE.search(resp.text)
+                return m.group(1) if m else None
+        except Exception:
+            logger.debug("Avatar fetch attempt %d failed for %s", attempt + 1, username)
+        time.sleep(3.0)
+    return None
+
 @app.get("/api/avatar/{username}")
 @limiter.limit("60/minute")
 async def avatar(request: Request, username: str, _auth=Depends(verify_api_key)):
     if not re.match(r"^[a-zA-Z0-9_-]{1,50}$", username):
         raise HTTPException(status_code=400, detail="Invalid username")
-    url = f"https://letterboxd.com/{username}/"
-    # Letterboxd (Cloudflare) intermittently serves challenge pages to
-    # datacenter IPs; retry with backoff until a real page comes through.
-    for attempt in range(4):
-        try:
-            resp = await asyncio.to_thread(
-                requests.get,
-                url,
-                impersonate="safari17_0",
-                timeout=15,
-            )
-            if resp.status_code == 200 and "Just a moment" not in resp.text:
-                m = OG_RE.search(resp.text)
-                return {"avatar_url": m.group(1) if m else None}
-        except Exception:
-            logger.debug("Avatar fetch attempt %d failed for %s", attempt + 1, username)
-        if attempt < 3:
-            await asyncio.sleep(2.0 * (attempt + 1))
-    return {"avatar_url": None}
+    avatar_url = await asyncio.to_thread(_fetch_avatar_url, username)
+    return {"avatar_url": avatar_url}
 
 @app.post("/api/recommend", status_code=202)
 @limiter.limit("30/minute")
