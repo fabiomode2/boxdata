@@ -11,3 +11,4 @@ output/
 node_modules/
 frontend/dist/
 .vercel/
+.env*
