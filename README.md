@@ -5,6 +5,8 @@ Group movie recommender. Reads Letterboxd histories, embeds movie metadata with
 user's rating with Nadaraya-Watson kernel regression, and combines predictions
 into one ranked list.
 
+Demo: https://boxdata.vercel.app
+
 ## Stack
 
 - Python 3.11, FastAPI, ChromaDB, Ollama
