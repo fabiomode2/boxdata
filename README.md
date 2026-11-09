@@ -1,5 +1,7 @@
 # BoxData
 
+Movie recommendation system using TMDB + Ollama embeddings + ChromaDB.
+
 Group movie recommender. Reads Letterboxd histories, embeds movie metadata with
 `nomic-embed-text` through Ollama, stores vectors in ChromaDB, predicts each
 user's rating with Nadaraya-Watson kernel regression, and combines predictions
