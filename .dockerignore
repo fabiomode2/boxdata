@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+data
+output
+frontend
+docs
+misc
+tests
+AGENTS.md
+README.md
