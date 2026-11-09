@@ -1,11 +1,11 @@
 # Plan de Mejora — BoxData (v2)
 
-Este plan detalla las mejoras a implementar ordenadas por ROI.
+Este plan detalla las mejoras a implementar ordenadas por impacto y esfuerzo.
 Referencia: [`embedding-upgrade-plan.md`](./embedding-upgrade-plan.md) (mejora de embeddings vía LLM).
 
 ---
 
-## Quick Wins Aplicados (Jul 2026)
+## Cambios aplicados (Jul 2026)
 
 | Cambio | Archivo | Descripción |
 |--------|---------|-------------|
@@ -25,7 +25,7 @@ Referencia: [`embedding-upgrade-plan.md`](./embedding-upgrade-plan.md) (mejora d
 
 ---
 
-## Fase 1: Evaluation Framework ✅ (Jul 2026, implementado)
+## Fase 1: Evaluation Framework (Jul 2026, implementado)
 
 **Objetivo**: poder medir objetivamente si un cambio (nuevos embeddings, reranking, etc.) mejora o empeora las recomendaciones.
 
@@ -100,7 +100,7 @@ Este es el baseline para comparar Fase 3 (LLM embeddings). Si MAE baja de 0.1250
 
 ---
 
-## Fase 2: Feature Reranking ✅ (Jul 2026, ya implementado)
+## Fase 2: Feature Reranking (Jul 2026, implementado)
 
 **Objetivo**: mejorar la calidad percibida de las recomendaciones inyectando conocimiento explícito (mismo director, misma década, mismos actores) sin cambiar los embeddings.
 
@@ -112,7 +112,7 @@ Implementado en `src/recommender.py:_feature_rerank`. Integrado en `_recommend_p
 
 ---
 
-## Fase 3: Embeddings con LLM ✅ (Jul 2026, implementado + evaluado)
+## Fase 3: Embeddings con LLM (Jul 2026, implementado + evaluado)
 
 **Resultado: mejora ~9% MAE, ~7% P@5.** Mimo-v2.5-free (OpenCode Zen gratis) ganó vs phi3:mini y llama3.2:3b.
 
@@ -211,9 +211,9 @@ Cubren: cosine similarity, RRF reranking, weighted k-means, enriched text, geome
 
 | Fase | Qué | Esfuerzo | Impacto | Estado | Depende de |
 |------|-----|----------|---------|--------|------------|
-| **1** | Evaluation framework | ~2 días | Muy alto (desbloquea métricas) | ✅ Implementado (Jul 2026) | Nada |
-| **2** | Feature reranking | ~2h | Alto (perceptible) | ✅ Completado (Jul 2026) | Nada |
-| **3** | Embeddings con LLM | ~1 día | Medio (~9% MAE) | ✅ Completo (Jul 2026) | Fase 1 |
+| **1** | Evaluation framework | ~2 días | Alto (permite medir) | Implementado (Jul 2026) | Nada |
+| **2** | Feature reranking | ~2h | Alto (perceptible) | Completado (Jul 2026) | Nada |
+| **3** | Embeddings con LLM | ~1 día | Medio (~9% MAE) | Completo (Jul 2026) | Fase 1 |
 | **4** | CF + Hybrid | ~1 semana | Alto | Pendiente (trigger: 50+ usuarios) | Fase 1 + data |
 
 ### Fase 3 completada

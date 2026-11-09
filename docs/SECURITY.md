@@ -11,16 +11,16 @@ Browser → Vercel (serverless) → VPS (FastAPI) → Ollama (red privada)
 - La función de Vercel inyecta `X-API-Key` en las llamadas autenticadas al VPS.
 - El VPS no publica el puerto de la API: solo es accesible desde la red de Docker del reverse proxy.
 
-## Publicar el código no expone secretos
+## Secretos y repositorio
 
 Auditoría del repositorio y de todo el historial de Git:
 
 - `.env` nunca estuvo trackeado. Solo se publica `.env.example` con placeholders.
 - Sin tokens TMDB, claves de API, tokens de GitHub ni claves privadas en ningún commit.
 - `frontend/.env.local` y `.vercel/` están ignorados.
-- Artefactos generados (`misc/rating_distribution.html`, 1.7 MB) fuera del árbol publicado.
+- `AGENTS.md` y artefactos generados (`misc/rating_distribution.html`) no se publican.
 
-Los secretos reales viven únicamente en `.env` del VPS (permisos `600`) y en las variables de entorno de Vercel. Si una clave se filtra, rotarla es suficiente; el código no la contiene.
+Los secretos reales están solo en `.env` del VPS (permisos `600`) y en las variables de entorno de Vercel. Si una clave se filtra, hay que rotarla; el código no la contiene.
 
 ## Controles aplicados
 
@@ -35,7 +35,7 @@ Los secretos reales viven únicamente en `.env` del VPS (permisos `600`) y en la
 | CORS | Orígenes explícitos, métodos `GET/POST/OPTIONS`, headers `Content-Type/X-API-Key`. |
 | Docs | `/docs`, `/redoc` y `/openapi.json` deshabilitados en producción (`DISABLE_DOCS=1`). |
 | SSRF | El scraper de avatares solo consulta `letterboxd.com`; username validado por regex. |
-| Contenedor | API corre como UID 1000, `cap_drop: ALL`, `no-new-privileges`, sin puertos publicados. |
+| Contenedor | API corre con el UID/GID del host (`BOXDATA_UID`/`BOXDATA_GID`), `cap_drop: ALL`, `no-new-privileges`, sin puertos publicados. |
 | Red | Ollama aislado en `backend` (interna); solo la API está en `proxy-network`. |
 
 ## Riesgos pendientes (menores)

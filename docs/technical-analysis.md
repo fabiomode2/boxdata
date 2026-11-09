@@ -1,12 +1,12 @@
-# Análisis y Explotación de Embeddings — BoxData
+# Análisis de embeddings — BoxData
 
-## La forma definitiva de recomendar (kernel regression + media geométrica)
+## Recomendación con kernel regression y media geométrica
 
-### Intuición (sin tecnicismos)
+### Descripción general
 
-**Hoy**: Agrupamos las pelis que ha visto un usuario en 2-4 grupos (acción, drama, terror...). Calculamos el punto medio de cada grupo (centroide). Para recomendar, comparamos cada candidata con esos puntos medios.
+**Enfoque anterior**: Agrupamos las pelis que ha visto un usuario en 2-4 grupos (acción, drama, terror...). Calculamos el punto medio de cada grupo (centroide). Para recomendar, comparamos cada candidata con esos puntos medios.
 
-**La nueva idea**: En vez de comprimir todo el historial en 4 puntos, usamos **todas las pelis que ha visto** para crear una "función de gusto" continua. Esta función, dado el embedding de cualquier peli, predice qué nota le pondría el usuario.
+**Propuesta**: En vez de comprimir todo el historial en 4 puntos, usamos **todas las pelis que ha visto** para crear una "función de gusto" continua. Esta función, dado el embedding de cualquier peli, predice qué nota le pondría el usuario.
 
 Es como tener un mapa en 768 dimensiones donde cada peli que ha visto es una montaña con altura = su nota. Entre montañas, el terreno se interpola suavemente. El mapa completo es su función de gusto.
 
@@ -23,7 +23,7 @@ y distancia = 1 - similitud_coseno(embedding_candidato, embedding_peli_vista_i)
 
 Cada peli del historial contribuye, pero las más parecidas pesan mucho más. `sigma` controla lo "suave" que es: sigma grande = suave (casi una media global), sigma pequeño = más fiel a cada punto.
 
-**Ventajas sobre los centroides:**
+**Diferencias con centroides:**
 - No pierdes información comprimiendo en K grupos
 - Es suave: dos pelis parecidas tienen notas parecidas
 - Preserva la complejidad del usuario
@@ -37,12 +37,12 @@ Dados N usuarios con sus funciones f_alice, f_bob, f_carlos..., la función del 
 G(x) = (f_alice(x) * f_bob(x) * f_carlos(x)) ^ (1/N)
 ```
 
-**Por qué es mejor que las alternativas:**
+**Comparación con alternativas:**
 - **Min** es muy conservadora: una persona con gustos raros veta todo
 - **Media aritmética** diluye: una peli que Alice odia (0.1) y Bob ama (0.9) da 0.5
 - **Media geométrica**: si Alice da 0.1 y Bob 0.9 → sqrt(0.1*0.9) = 0.3 (penaliza pero no veta)
 - Si ambos dan 0.9 → 0.9. Si ambos dan 0.5 → 0.5
-- Naturalmente premia el consenso sin ser demasiado agresiva
+- Premia el consenso sin ser demasiado agresiva
 
 ### Búsqueda de candidatos: gradient ascent multi-start
 
@@ -77,7 +77,7 @@ En vez de pedir candidatos a ChromaDB y luego puntuarlos, exploramos el espacio 
 | 10 usuarios, 500 pelis c/u, mismo proceso | ~2-3s |
 | Todo con ANN en ChromaDB (sin gradient ascent) | ~0.2s |
 
-Es perfectamente manejable para una demo web. El cuello de botella real es ChromaDB, no el kernel.
+Es manejable para una demo web. El cuello de botella real es ChromaDB, no el kernel.
 
 ### Cómo integrarlo con ChromaDB (híbrido práctico)
 
@@ -118,7 +118,7 @@ Para empezar: sigma = 0.2 o 0.3 funciona bien en espacios de embeddings normaliz
 
 ## Otras formas de explotar los embeddings
 
-### 🎯 Nivel 1: Análisis del espacio
+### Nivel 1: Análisis del espacio
 
 #### 1. Visualizar el espacio con UMAP + HDBSCAN
 
@@ -161,13 +161,13 @@ Distancia media a los 10 vecinos más cercanos. Pelis raras (alta distancia) vs 
 
 ¿Directores similares → embeddings cercanos? ¿Misma década? ¿Misma puntuación? Si no, revela qué está priorizando el modelo.
 
-### 🎯 Nivel 2: Mejoras a los embeddings
+### Nivel 2: Mejoras a los embeddings
 
 #### 7. Richer enriched text
 
 Añadir al texto del embedding: reviews populares de Letterboxd, palabras clave de TMDB, presupuesto/taquilla, país de origen, idiomas. Mejores embeddings → todo lo demás mejora.
 
-### 🎯 Nivel 3: Arquitectura (ideas adicionales)
+### Nivel 3: Arquitectura (ideas adicionales)
 
 #### 8. Descomposición en arquetipos del catálogo
 
@@ -177,13 +177,13 @@ Clusterizar todo el catálogo con UMAP + HDBSCAN → 20-30 arquetipos fijos e in
 
 Un transformer pequeño que aprende dinámicamente qué pelis del historial de un usuario son relevantes para predecir su nota a una candidata específica. Para Blade Runner, mira más sus sci-fi vistas; para Amélie, más sus comedias románticas.
 
-### 🎨 Nivel 4: Demo
+### Nivel 4: Demo
 
 #### 10. Mapa interactivo (Plotly)
 
 Scatter UMAP 2D con hover para título, año, géneros. Demo visual.
 
-#### 11. "Why this recommendation"
+#### 11. Explicación de la recomendación
 
 Mostrar por qué salió cada peli: "60% match con tu lado Nolan, 30% con tu lado Ghibli".
 
