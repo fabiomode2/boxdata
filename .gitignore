@@ -2,10 +2,8 @@ __pycache__/
 *.pyc
 .env
 venv/
-data/chroma_db/
-data/movies.jsonl
-data/old.jsonl
-data/cache/
+# Local dataset and vector store
+data/
 output/
 *.egg-info/
 node_modules/
