@@ -12,3 +12,7 @@ node_modules/
 frontend/dist/
 .vercel/
 .env*
+misc/rating_distribution.html
+
+# Local agent notes (keep private, never publish)
+AGENTS.md

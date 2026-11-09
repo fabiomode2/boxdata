@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -14,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi import Depends, FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -34,10 +37,14 @@ logger = logging.getLogger(__name__)
 API_KEY = os.getenv("API_KEY")
 if not API_KEY:
     raise RuntimeError("API_KEY environment variable is not set")
+if len(API_KEY) < 32:
+    logger.warning("API_KEY is shorter than 32 characters; rotate it for a stronger one")
 
 
 async def verify_api_key(x_api_key: str | None = Header(None)):
-    if x_api_key != API_KEY:
+    if not x_api_key or not secrets.compare_digest(
+        x_api_key.encode("utf-8"), API_KEY.encode("utf-8")
+    ):
         raise HTTPException(status_code=403, detail="Invalid API key")
 
 
@@ -56,19 +63,42 @@ origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "https://boxdata.vercel.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
+    max_age=600,
 )
+
+_MAX_BODY_BYTES = 64 * 1024
+
+
+@app.middleware("http")
+async def limit_request_body(request: Request, call_next):
+    """Reject oversized payloads before FastAPI buffers them."""
+    raw_length = request.headers.get("content-length")
+    if raw_length:
+        try:
+            if int(raw_length) > _MAX_BODY_BYTES:
+                return JSONResponse({"detail": "Request body too large"}, status_code=413)
+        except ValueError:
+            return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+    return await call_next(request)
 
 # ── Async background job system ──────────────────────────────
 
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
+_MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "4"))
+_JOB_RETENTION = 300          # finished jobs stay pollable for 5 min
+_STALE_JOB_AGE = 2 * 3600     # never let a wedged job block the queue forever
 
 def _cleanup_old_jobs():
     now = time.time()
     with _jobs_lock:
-        expired = [jid for jid, j in _jobs.items() if j.get("status") in ("done", "error") and now - j.get("_ts", 0) > 300]
+        expired = [
+            jid for jid, j in _jobs.items()
+            if (j.get("status") in ("done", "error") and now - j.get("_ts", 0) > _JOB_RETENTION)
+            or now - j.get("_ts", 0) > _STALE_JOB_AGE
+        ]
         for jid in expired:
             del _jobs[jid]
 
@@ -78,10 +108,10 @@ class RecommendRequest(BaseModel):
     n: int = Field(default=10, ge=1, le=50)
     min_vote_count: int = Field(default=2000, ge=0, le=500000)
     diversity: float = Field(default=0.0, ge=0.0, le=1.0)
-    genre: list[str] | None = None
+    genre: list[str] | None = Field(default=None, max_length=20)
     query_weight: float = Field(default=0.3, ge=0.0, le=1.0)
-    min_year: int | None = None
-    max_year: int | None = None
+    min_year: int | None = Field(default=None, ge=1888, le=2100)
+    max_year: int | None = Field(default=None, ge=1888, le=2100)
     min_rating: float = Field(default=6.5, ge=0.0, le=10.0)
     randomize: bool = False
     refresh: bool = False
@@ -94,6 +124,16 @@ class RecommendRequest(BaseModel):
             if not re.match(r"^[a-zA-Z0-9_-]{1,50}$", u):
                 raise ValueError(f"Invalid letterboxd username: {u}")
         return users
+
+    @field_validator("genre")
+    @classmethod
+    def validate_genres(cls, genres: list[str] | None) -> list[str] | None:
+        if genres is None:
+            return None
+        for g in genres:
+            if len(g) > 50:
+                raise ValueError("Genre name too long")
+        return genres
 
 class MovieResult(BaseModel):
     tmdb_id: int
@@ -217,7 +257,7 @@ def _run_recommend_job(job_id: str, req: RecommendRequest):
         _sync()
         with _jobs_lock:
             if job_id in _jobs:
-                _jobs[job_id].update(status="error", error=str(e))
+                _jobs[job_id].update(status="error", error="Recommendation failed. Please try again.")
         print(f"  ❌ Job {job_id} failed: {e}", file=sys.stderr, flush=True)
 
 
@@ -235,19 +275,59 @@ async def health(request: Request):
 
 OG_RE = re.compile(r'<meta\s+property="og:image"\s+content="([^"]+)"')
 
+_AVATAR_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
+_AVATAR_TTL = int(os.getenv("AVATAR_CACHE_TTL", 7 * 86400))
+
+
+def _avatar_cache_path(username: str) -> Path:
+    return _AVATAR_CACHE_DIR / f"avatar_{username}.json"
+
+
+def _read_avatar_cache(username: str) -> tuple[str | None, float] | None:
+    """Return ``(avatar_url, age_seconds)`` or None when not cached."""
+    path = _avatar_cache_path(username)
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text())
+        return raw.get("url"), time.time() - path.stat().st_mtime
+    except (OSError, ValueError, AttributeError) as e:
+        logger.warning("Discarding unreadable avatar cache %s: %s", path.name, e)
+        path.unlink(missing_ok=True)
+        return None
+
+
+def _write_avatar_cache(username: str, url: str | None) -> None:
+    try:
+        _AVATAR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _avatar_cache_path(username)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"url": url}))
+        os.replace(tmp, path)
+        path.chmod(0o600)
+    except OSError as e:
+        logger.debug("Could not persist avatar cache for %s: %s", username, e)
+
+
 def _fetch_avatar_url(username: str) -> str | None:
-    """Og:image avatar URL. Retries: Cloudflare challenges datacenter IPs."""
+    """Og:image avatar URL, disk-cached. Retries: Cloudflare challenges datacenter IPs."""
+    cached = _read_avatar_cache(username)
+    if cached is not None and cached[1] <= _AVATAR_TTL:
+        return cached[0]
+
     session = get_curl_session()
     for attempt in range(6):
         try:
             resp = session.get(f"https://letterboxd.com/{username}/", timeout=15)
             if resp.status_code == 200 and "Just a moment" not in resp.text:
                 m = OG_RE.search(resp.text)
-                return m.group(1) if m else None
+                url = m.group(1) if m else None
+                _write_avatar_cache(username, url)
+                return url
         except Exception:
             logger.debug("Avatar fetch attempt %d failed for %s", attempt + 1, username)
         time.sleep(3.0)
-    return None
+    return cached[0] if cached is not None else None
 
 @app.get("/api/avatar/{username}")
 @limiter.limit("60/minute")
@@ -261,13 +341,18 @@ async def avatar(request: Request, username: str, _auth=Depends(verify_api_key))
 @limiter.limit("30/minute")
 async def recommend(request: Request, req: RecommendRequest, _auth=Depends(verify_api_key)):
     _cleanup_old_jobs()
-    import asyncio
 
     users_str = ",".join(req.users) if req.users else "query-only"
-    job_id = uuid.uuid4().hex[:12]
+    job_id = uuid.uuid4().hex
     print(f"\n--- /api/recommend [{users_str}] job={job_id} ---", file=sys.stderr, flush=True)
 
     with _jobs_lock:
+        active = sum(
+            1 for j in _jobs.values()
+            if j.get("status") not in ("done", "error")
+        )
+        if active >= _MAX_CONCURRENT_JOBS:
+            raise HTTPException(status_code=429, detail="Too many active jobs. Try again shortly.")
         _jobs[job_id] = {
             "job_id": job_id,
             "status": "queued",

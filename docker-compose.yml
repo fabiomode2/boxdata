@@ -10,7 +10,8 @@ services:
           memory: 4G
     restart: unless-stopped
     networks:
-      - proxy-network
+      - backend
+      - ollama-egress
 
   api:
     build:
@@ -21,10 +22,18 @@ services:
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - DISABLE_DOCS=1
+      - ANONYMIZED_TELEMETRY=False
+      - PYTHONDONTWRITEBYTECODE=1
+      - HOME=/tmp
     volumes:
       - ./data:/app/data
     depends_on:
       - ollama
+    user: "${BOXDATA_UID:-1000}:${BOXDATA_GID:-1000}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     deploy:
       resources:
         limits:
@@ -32,11 +41,18 @@ services:
           memory: 1G
     restart: unless-stopped
     networks:
+      - backend
       - proxy-network
 
 volumes:
   ollama_data:
 
 networks:
+  # Private API <-> Ollama link. Not reachable by the reverse proxy.
+  backend:
+    internal: true
+  # Dedicated egress so Ollama can still pull models without joining proxy-network.
+  ollama-egress:
+    driver: bridge
   proxy-network:
     external: true

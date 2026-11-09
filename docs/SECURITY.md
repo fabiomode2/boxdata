@@ -1,61 +1,55 @@
 # Seguridad — BoxData
 
-## Arquitectura: modelo de confianza
+## Modelo de confianza
 
 ```
-Browser → Vercel (serverless function) → VPS (FastAPI)
+Browser → Vercel (serverless) → VPS (FastAPI) → Ollama (red privada)
 ```
 
-- `API_KEY` y `VPS_API_URL` solo existen en variables de entorno de Vercel (server-side).
-- El navegador nunca recibe la clave ni la URL directa del VPS.
-- La Vercel function inyecta `X-API-Key` al hacer proxy hacia el VPS.
-- **Esto es correcto.** No hay exposición de secretos al cliente.
+- `API_KEY` y `VPS_API_URL` viven solo en variables de entorno de Vercel (server-side).
+- El navegador nunca recibe la clave. La URL pública del VPS sí es visible; los jobs se consultan con IDs aleatorios de 128 bits.
+- La función de Vercel inyecta `X-API-Key` en las llamadas autenticadas al VPS.
+- El VPS no publica el puerto de la API: solo es accesible desde la red de Docker del reverse proxy.
 
-## Riesgos actuales (aplicados)
+## Publicar el código no expone secretos
 
-| Gravedad | Riesgo | Impacto | Mitigación |
-|----------|--------|---------|------------|
-| **Baja** | Sin CSP/HSTS/security headers en frontend | Vulnerable a XSS si hay un fallo en el renderizado. | Añadir cabeceras en `vercel.json`. |
-| **Baja** | Dependencias sin versión fija (`>=`) | Build puede romperse o traer un CVE sin control. | Usar `==` o lockfile. |
-| **Baja** | Endpoint `/health` sin autenticación | Expone `count_movies()` (información menor). | No urgente, pero idealmente requiere auth. |
+Auditoría del repositorio y de todo el historial de Git:
 
-## Riesgos resueltos
+- `.env` nunca estuvo trackeado. Solo se publica `.env.example` con placeholders.
+- Sin tokens TMDB, claves de API, tokens de GitHub ni claves privadas en ningún commit.
+- `frontend/.env.local` y `.vercel/` están ignorados.
+- Artefactos generados (`misc/rating_distribution.html`, 1.7 MB) fuera del árbol publicado.
 
-| Riesgo | Solución |
-|--------|----------|
-| Sin rate limiting en VPS | `slowapi` implementado: 30 req/min en `/api/recommend` y `/health`, 60 req/min en `/api/avatar`. |
-| `API_KEY` opcional | Validación en startup: `raise RuntimeError` si falta. |
-| microlink.io recibía usernames | Endpoint propio `/api/avatar/{username}` — extrae OG image del HTML de Letterboxd. Sin terceros. |
-| `API_KEY` y TMDB same key | Son claves distintas: `API_TOKEN` (TMDB, config.py), `API_KEY` (BoxData, server.py), `OPENCODE_API_KEY` (LLM). |
-| Sin límite en `query` | `max_length=500` en campo `query` de `RecommendRequest`. |
-| Docker no era `-slim` | Cambiado a `python:3.11-slim`. |
+Los secretos reales viven únicamente en `.env` del VPS (permisos `600`) y en las variables de entorno de Vercel. Si una clave se filtra, rotarla es suficiente; el código no la contiene.
 
-## Recomendaciones pendientes
+## Controles aplicados
 
-### 1. Security headers en frontend
+| Control | Implementación |
+|---|---|
+| Autenticación | `X-API-Key` obligatoria en `POST /api/recommend` y `/api/avatar`; comparación en tiempo constante con `secrets.compare_digest`. |
+| Rate limiting | `slowapi`: 30/min recommend y health, 60/min avatar, 120/min polling. |
+| Tamaño de request | Middleware rechaza cuerpos > 64 KB antes de parsearlos. |
+| Validación de entrada | Usernames `[a-zA-Z0-9_-]{1,50}`, query ≤ 500, géneros ≤ 20 × 50, años 1888–2100, `n` ≤ 50. |
+| Jobs | Máximo 4 concurrentes (`MAX_CONCURRENT_JOBS`), IDs de 128 bits, retención 5 min, limpieza de jobs colgados a las 2 h. |
+| Errores | El cliente recibe un mensaje genérico; el detalle queda solo en logs del servidor. |
+| CORS | Orígenes explícitos, métodos `GET/POST/OPTIONS`, headers `Content-Type/X-API-Key`. |
+| Docs | `/docs`, `/redoc` y `/openapi.json` deshabilitados en producción (`DISABLE_DOCS=1`). |
+| SSRF | El scraper de avatares solo consulta `letterboxd.com`; username validado por regex. |
+| Contenedor | API corre como UID 1000, `cap_drop: ALL`, `no-new-privileges`, sin puertos publicados. |
+| Red | Ollama aislado en `backend` (interna); solo la API está en `proxy-network`. |
 
-Crear `frontend/vercel.json`:
+## Riesgos pendientes (menores)
 
-```json
-{
-  "headers": [
-    {
-      "source": "/(.*)",
-      "headers": [
-        { "key": "Content-Security-Policy", "value": "default-src 'self'; img-src 'self' image.tmdb.org https:; style-src 'self' 'unsafe-inline'; connect-src 'self'" },
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "X-Frame-Options", "value": "DENY" },
-        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }
-      ]
-    }
-  ]
-}
-```
+| Gravedad | Riesgo | Mitigación sugerida |
+|---|---|---|
+| Baja | `/health` sin auth y ejecuta `count_movies()` | Añadir caché del conteo o protegerlo en el reverse proxy. |
+| Baja | Dependencias con `>=` sin lockfile | Generar lockfile y actualizar con Dependabot/Renovate. |
+| Baja | Sin CSP/HSTS en el frontend de Vercel | Añadir headers en `frontend/vercel.json`. |
+| Baja | Sin límite de intentos a nivel de host | Mantener fail2ban + firewall y limitar SSH a Tailscale/VPN si es posible. |
 
-### 2. Dependencias fijas
+## Operación
 
-En `pyproject.toml`, cambiar `>=` por `==` para versiones conocidas, o generar lockfile con `pip freeze`.
-
-### 3. Endpoint `/health` con auth opcional
-
-No urgente, pero añadir `Depends(verify_api_key)` opcionalmente.
+- Rotar `API_KEY` periódicamente y tras cualquier sospecha.
+- No commitear `.env`; usar `.env.example` para documentar variables.
+- Revisar logs del contenedor sin volcar valores de entorno.
+- Mantener el reverse proxy y las imágenes Docker actualizadas.
